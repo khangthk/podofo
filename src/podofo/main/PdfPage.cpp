@@ -298,13 +298,13 @@ void PdfPage::SetRotation(int rotation)
     m_Rotation = rotation;
 }
 
-bool PdfPage::MoveAt(unsigned index)
+bool PdfPage::MoveTo(unsigned index)
 {
     if (index == m_Index)
         return false;
 
     auto& pages = GetDocument().GetPages();
-    return pages.TryMovePageAt(m_Index, index);
+    return pages.TryMovePageTo(m_Index, index);
 }
 
 PdfField& PdfPage::CreateField(const string_view& name, PdfFieldType fieldType, const Rect& rect, bool rawRect)
