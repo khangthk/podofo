@@ -1,18 +1,14 @@
-/**
- * SPDX-FileCopyrightText: (C) 2023 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2023 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfSignerCms.h"
 #include <podofo/private/OpenSSLInternal.h>
 #include <podofo/private/CmsContext.h>
+#include <podofo/private/XmlUtils.h>
 
 using namespace std;
 using namespace PoDoFo;
-
-constexpr unsigned RSASignedHashSize = 256;
 
 PdfSignerCms::PdfSignerCms(const bufferview& cert, const PdfSignerCmsParams& parameters) :
     PdfSignerCms(cert, { }, parameters)
@@ -39,6 +35,27 @@ PdfSignerCms::~PdfSignerCms()
     }
 }
 
+PdfSignerCms::PdfSignerCms() :
+    m_privKey(nullptr),
+    m_reservedSize(0)
+{
+}
+
+void PdfSignerCms::ValidateSignatureDate(const nullable<PdfDate>& date)
+{
+    if ((m_parameters.Flags & PdfSignerCmsFlags::SkipDateValidation) != PdfSignerCmsFlags::None)
+        return;
+
+    if (!date.has_value())
+    {
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::SignatureVerificationError,
+            "A signature date is required to validate the certificate validity period");
+    }
+
+    ensureContextInitialized();
+    m_cmsContext->ValidateSigningDate(date->GetSecondsFromEpoch());
+}
+
 void PdfSignerCms::AppendData(const bufferview& data)
 {
     ensureContextInitialized();
@@ -63,27 +80,28 @@ void PdfSignerCms::ComputeSignature(charbuff& contents, bool dryrun)
     else
     {
         // Just prepare a fake result with the size of RSA block
-        m_encryptedHash.resize(RSASignedHashSize);
+        m_encryptedHash.resize(m_cmsContext->GetSignedHashSize());
     }
 
     if (m_parameters.SignedHashHandler != nullptr)
         m_parameters.SignedHashHandler(m_encryptedHash, dryrun);
 
-    m_cmsContext->ComputeSignature(m_encryptedHash, contents);
-    if (m_reservedSize != 0 && dryrun)
-        contents.resize(contents.size() + m_reservedSize);
+    // NOTE: On dry runs the signed hash may be just a fake buffer with the expected size
+    m_cmsContext->ComputeSignature(m_encryptedHash, contents, !dryrun && shouldVerify());
+    if (dryrun)
+        tryEnlargeSignatureContents(contents);
 }
 
 void PdfSignerCms::FetchIntermediateResult(charbuff& result)
 {
-    ensureSequentialSigning();
+    ensureDeferredSigning();
     ensureContextInitialized();
     m_cmsContext->ComputeHashToSign(result);
 }
 
-void PdfSignerCms::ComputeSignatureSequential(const bufferview& processedResult, charbuff& contents, bool dryrun)
+void PdfSignerCms::ComputeSignatureDeferred(const bufferview& processedResult, charbuff& contents, bool dryrun)
 {
-    ensureSequentialSigning();
+    ensureDeferredSigning();
     ensureContextInitialized();
 
     if (dryrun)
@@ -91,14 +109,13 @@ void PdfSignerCms::ComputeSignatureSequential(const bufferview& processedResult,
         // Just prepare a fake result with the size of RSA block
         charbuff fakeresult;
         m_cmsContext->ComputeHashToSign(fakeresult);
-        fakeresult.resize(RSASignedHashSize);
-        m_cmsContext->ComputeSignature(fakeresult, contents);
-        if (m_reservedSize != 0)
-            contents.resize(contents.size() + m_reservedSize);
+        fakeresult.resize(m_cmsContext->GetSignedHashSize());
+        m_cmsContext->ComputeSignature(fakeresult, contents, false);
+        tryEnlargeSignatureContents(contents);
     }
     else
     {
-        m_cmsContext->ComputeSignature(processedResult, contents);
+        m_cmsContext->ComputeSignature(processedResult, contents, shouldVerify());
     }
 }
 
@@ -107,11 +124,13 @@ void PdfSignerCms::Reset()
     if (m_cmsContext != nullptr)
         resetContext();
 
-    // Reset the reserved size
-    m_reservedSize = 0;
+    // NOTE: Don't reset the reserved size or any other parameter
+    // that has been set. In particular we need the reserved size
+    // to determine the final size of the CMS block when we do
+    // a dry-run
 
-    // Reset also sequential signing if it was started
-    m_sequentialSigning = nullptr;
+    // Reset also deferred signing if it was started
+    m_deferredSigning = nullptr;
 }
 
 string PdfSignerCms::GetSignatureFilter() const
@@ -135,6 +154,25 @@ string PdfSignerCms::GetSignatureSubFilter() const
 string PdfSignerCms::GetSignatureType() const
 {
     return "Sig";
+}
+
+unsigned PdfSigner::GetSignerIdentityCount() const
+{
+    return 1;
+}
+
+void PdfSigner::UnpackIntermediateResult(const bufferview& processedResult, unsigned signerIdx, charbuff& result)
+{
+    (void)signerIdx;
+    result = processedResult;
+}
+
+void PdfSigner::AssembleProcessedResult(const bufferview& processedResult, unsigned signerIdx, charbuff& result)
+{
+    if (signerIdx != 0)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedOperation, "Unsupported multiple signer identities");
+
+    result = processedResult;
 }
 
 bool PdfSignerCms::SkipBufferClear() const
@@ -165,12 +203,127 @@ void PdfSignerCms::ReserveAttributeSize(unsigned attrSize)
     m_reservedSize += (attrSize + 40);
 }
 
+unsigned PdfSignerCms::GetSignedHashSize() const
+{
+    const_cast<PdfSignerCms&>(*this).ensureContextInitialized();
+    return m_cmsContext->GetSignedHashSize();
+}
+
+void PdfSignerCms::Dump(xmlNodePtr signerElem, string& temp)
+{
+    PODOFO_ASSERT(m_deferredSigning == true);
+
+    utls::FormatTo(temp, m_reservedSize);
+    if (xmlNewChild(signerElem, nullptr, XMLCHAR "ReservedSize", XMLCHAR temp.data()) == nullptr)
+    {
+    SerializationFailed:
+        THROW_LIBXML_EXCEPTION("PdfSignerCms serialization failed");
+    }
+
+    utls::WriteHexStringTo(temp, m_certificate);
+    auto certificateElem = xmlNewChild(signerElem, nullptr, XMLCHAR "Certificate", XMLCHAR temp.data());
+    if (certificateElem == nullptr)
+        goto SerializationFailed;
+
+    auto cmsContextElem = xmlNewChild(signerElem, nullptr, XMLCHAR "CmsContext", nullptr);
+    if (cmsContextElem == nullptr)
+        goto SerializationFailed;
+
+    m_cmsContext->Dump(cmsContextElem, temp);
+
+    auto parametersElem = xmlNewChild(signerElem, nullptr, XMLCHAR "Parameters", nullptr);
+    if (parametersElem == nullptr)
+        goto SerializationFailed;
+
+    if (xmlNewChild(parametersElem, nullptr, XMLCHAR "SignatureType", XMLCHAR PoDoFo::ToString(m_parameters.SignatureType).data()) == nullptr)
+        goto SerializationFailed;
+
+    if (xmlNewChild(parametersElem, nullptr, XMLCHAR "Hashing", XMLCHAR PoDoFo::ToString(m_parameters.Hashing).data()) == nullptr)
+        goto SerializationFailed;
+
+    if (m_parameters.SigningTimeUTC == nullptr)
+        temp = "null";
+    else
+        utls::FormatTo(temp, m_parameters.SigningTimeUTC->count());
+    if (xmlNewChild(parametersElem, nullptr, XMLCHAR "SigningTimeUTC", XMLCHAR temp.data()) == nullptr)
+        goto SerializationFailed;
+
+    utls::FormatTo(temp, (uint32_t)m_parameters.Flags);
+    if (xmlNewChild(parametersElem, nullptr, XMLCHAR "Flags", XMLCHAR temp.data()) == nullptr)
+        goto SerializationFailed;
+}
+
+void PdfSignerCms::Restore(xmlNodePtr signerElem, charbuff& temp)
+{
+    unsigned num1;
+    int64_t num2;
+    string_view str;
+
+    // By design only deferred signing signers can be serialized
+    m_deferredSigning = true;
+
+    auto node = utls::FindChildElement(signerElem, "ReservedSize");
+    if (node == nullptr)
+    {
+    DeserializationFailed:
+        THROW_LIBXML_EXCEPTION("PdfSignerCms deserialization failed");
+    }
+    if (node == nullptr || node->children == nullptr || node->children->content == nullptr
+            || !utls::TryParse((const char*)node->children->content, num1))
+        goto DeserializationFailed;
+    m_reservedSize = num1;
+
+    node = utls::FindChildElement(signerElem, "Certificate");
+    if (node == nullptr || node->children == nullptr || node->children->content == nullptr)
+        goto DeserializationFailed;
+    utls::DecodeHexStringTo(m_certificate, (const char*)node->children->content);
+
+    node = utls::FindChildElement(signerElem, "CmsContext");
+    if (node == nullptr)
+        goto DeserializationFailed;
+    m_cmsContext.reset(new CmsContext());
+    m_cmsContext->Restore(node, temp);
+
+    auto parametersNode = utls::FindChildElement(signerElem, "Parameters");
+    if (node == nullptr)
+        goto DeserializationFailed;
+
+    node = utls::FindChildElement(parametersNode, "SignatureType");
+    if (node == nullptr || node->children == nullptr || node->children->content == nullptr)
+        goto DeserializationFailed;
+    m_parameters.SignatureType = PoDoFo::ConvertTo<PdfSignatureType>((const char*)node->children->content);
+
+    node = utls::FindChildElement(parametersNode, "Hashing");
+    if (node == nullptr || node->children == nullptr || node->children->content == nullptr)
+        goto DeserializationFailed;
+    m_parameters.Hashing = PoDoFo::ConvertTo<PdfHashingAlgorithm>((const char*)node->children->content);
+
+    node = utls::FindChildElement(parametersNode, "SigningTimeUTC");
+    if (node == nullptr || node->children == nullptr || node->children->content == nullptr)
+        goto DeserializationFailed;
+
+    str = (const char*)node->children->content;
+    if (str != "null")
+    {
+        if (!utls::TryParse(str, num2))
+            goto DeserializationFailed;
+
+        m_parameters.SigningTimeUTC = chrono::seconds(num2);
+    }
+
+    node = utls::FindChildElement(parametersNode, "Flags");
+    if (node == nullptr || node->children == nullptr || node->children->content == nullptr
+            || !utls::TryParse((const char*)node->children->content, num1))
+        goto DeserializationFailed;
+    m_parameters.Flags = (PdfSignerCmsFlags)num1;
+}
+
 void PdfSignerCms::ensureEventBasedSigning()
 {
-    if (m_sequentialSigning.has_value())
+    if (m_deferredSigning.has_value())
     {
-        if (*m_sequentialSigning)
-            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "The signer is enabled for sequential signing");
+        if (*m_deferredSigning)
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "The signer is enabled for deferred signing");
     }
     else
     {
@@ -180,20 +333,20 @@ void PdfSignerCms::ensureEventBasedSigning()
                 "The signer can't perform event based signing without a signing service or a private pkey");
         }
 
-        m_sequentialSigning = false;
+        m_deferredSigning = false;
     }
 }
 
-void PdfSignerCms::ensureSequentialSigning()
+void PdfSignerCms::ensureDeferredSigning()
 {
-    if (m_sequentialSigning.has_value())
+    if (m_deferredSigning.has_value())
     {
-        if (!*m_sequentialSigning)
-            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "The signer is not enabled for sequential signing");
+        if (!*m_deferredSigning)
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "The signer is not enabled for deferred signing");
     }
     else
     {
-        m_sequentialSigning = true;
+        m_deferredSigning = true;
     }
 }
 
@@ -215,7 +368,6 @@ void PdfSignerCms::ensureContextInitialized()
 void PdfSignerCms::resetContext()
 {
     CmsContextParams params;
-    params.Encryption = m_parameters.Encryption;
     params.Hashing = m_parameters.Hashing;
     params.SigningTimeUTC = m_parameters.SigningTimeUTC;
     switch (m_parameters.SignatureType)
@@ -235,15 +387,47 @@ void PdfSignerCms::resetContext()
     }
 
     if (m_privKey == nullptr)
+    {
         params.DoWrapDigest = (m_parameters.Flags & PdfSignerCmsFlags::ServiceDoWrapDigest) != PdfSignerCmsFlags::None;
+    }
     else
-        params.DoWrapDigest = true; // We just perform encryption with private key, so we expect the digest wrapped
+    {
+        if (EVP_PKEY_base_id(m_privKey) == EVP_PKEY_RSA)
+        {
+            // An encryption with a private RSA keys always requires the
+            // digest to be PKCS#1 wrapped
+            params.DoWrapDigest = true;
+        }
+    }
 
     m_cmsContext->Reset(m_certificate, params);
+}
+
+bool PdfSignerCms::shouldVerify() const
+{
+    // NOTE: The signed hash is cross-checked only when it's supplied externally
+    return m_privKey == nullptr
+        && (m_parameters.Flags & PdfSignerCmsFlags::SkipVerification) == PdfSignerCmsFlags::None;
 }
 
 void PdfSignerCms::doSign(const bufferview& input, charbuff& output)
 {
     PODOFO_ASSERT(m_privKey != nullptr);
-    return ssl::DoSign(input, m_privKey, PdfHashingAlgorithm::Unknown, output);
+    // NOTE: We don't any hash wrapping because the CmsContext will do it for us, if neeeded
+    return ssl::SignHash(input, m_privKey, m_parameters.Hashing, output, true,
+        (m_parameters.Flags & PdfSignerCmsFlags::Deterministic) != PdfSignerCmsFlags::None);
+}
+
+void PdfSignerCms::tryEnlargeSignatureContents(charbuff& contents)
+{
+    if (m_cmsContext->GetSigningAlgorithm() == PdfSigningAlgorithm::ECDSA)
+    {
+        // Unconditionally account for 2 slack bytes due to random nature of ECDSA
+        contents.resize(contents.size() + 2 + m_reservedSize);
+    }
+    else
+    {
+        if (m_reservedSize != 0)
+            contents.resize(contents.size() + m_reservedSize);
+    }
 }

@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_ANNOTATION_H
 #define PDF_ANNOTATION_H
@@ -14,10 +12,38 @@
 namespace PoDoFo {
 
 class PdfPage;
-class PdfXObjectForm;
+class PdfXObject;
+class PdfAnnotationText;
+class PdfAnnotationLink;
+class PdfAnnotationFreeText;
+class PdfAnnotationLine;
+class PdfAnnotationSquare;
+class PdfAnnotationCircle;
+class PdfAnnotationPolygon;
+class PdfAnnotationPolyLine;
+class PdfAnnotationHighlight;
+class PdfAnnotationUnderline;
+class PdfAnnotationSquiggly;
+class PdfAnnotationStrikeOut;
+class PdfAnnotationStamp;
+class PdfAnnotationCaret;
+class PdfAnnotationInk;
+class PdfAnnotationPopup;
+class PdfAnnotationFileAttachment;
+class PdfAnnotationSound;
+class PdfAnnotationMovie;
+class PdfAnnotationWidget;
+class PdfAnnotationScreen;
+class PdfAnnotationPrinterMark;
+class PdfAnnotationTrapNet;
+class PdfAnnotationWatermark;
+class PdfAnnotationModel3D;
+class PdfAnnotationRichMedia;
+class PdfAnnotationWebMedia;
+class PdfAnnotationRedact;
+class PdfAnnotationProjection;
 
-/** A qualified appearance stream, with type and state name
- */
+/// A qualified appearance stream, with type and state name
 struct PODOFO_API PdfAppearanceStream final
 {
     const PdfObject* Object = nullptr;
@@ -25,11 +51,19 @@ struct PODOFO_API PdfAppearanceStream final
     PdfName State;
 };
 
-/** An annotation to a PdfPage
- *  To create an annotation use PdfPage::CreateAnnotation
- *
- *  \see PdfPage::CreateAnnotation
- */
+enum class PdfSetAppearanceFlags : uint32_t
+{
+    None = 0,
+    Raw =               1 << 0,     ///< Insert the appearance stream without handling page rotations
+    SkipSelectedState = 1 << 1,     ///< Skip setting the selected state
+    InplaceRotation =   1 << 2,     ///< Try skip inserting a XObject trampoline for the appearance stream in case of page rotations.
+                                    ///< Requires a mutable PdfXObject to be passed to SetAppearanceStream
+};
+
+/// An annotation to a PdfPage
+/// To create an annotation use PdfPage::CreateAnnotation
+///
+/// @see PdfPage::CreateAnnotation
 class PODOFO_API PdfAnnotation : public PdfDictionaryElement
 {
     friend class PdfAnnotationCollection;
@@ -62,10 +96,12 @@ class PODOFO_API PdfAnnotation : public PdfDictionaryElement
     friend class PdfAnnotationRedact;
     friend class PdfAnnotationProjection;
     friend class PdfAnnotationActionBase;
+    friend class PdfToggleButton;
 
 private:
     PdfAnnotation(PdfPage& page, PdfAnnotationType annotType, const Rect& rect);
     PdfAnnotation(PdfObject& obj, PdfAnnotationType annotType);
+    PdfAnnotation(const PdfAnnotation&) = delete;
 
 public:
     static bool TryCreateFromObject(PdfObject& obj, std::unique_ptr<PdfAnnotation>& xobj);
@@ -79,151 +115,153 @@ public:
     static bool TryCreateFromObject(const PdfObject& obj, std::unique_ptr<const TAnnotation>& xobj);
 
 public:
-    /** Set an appearance stream for this object
-     *  to specify its visual appearance
-     *  \param xobj an XObject form
-     *  \param appearance an appearance type to set
-     *  \param state the state for which set it the obj; states depend on the annotation type
-     */
-    void SetAppearanceStream(const PdfXObjectForm& xobj, PdfAppearanceType appearance = PdfAppearanceType::Normal, const PdfName& state = "");
+    /// Set an appearance stream for this object
+    /// to specify its visual appearance
+    /// @param xobj an XObject form
+    /// @param appearance an appearance type to set
+    /// @param state the state for which set it the obj; states depend on the annotation type
+    /// @param flags flags to control the appearance stream setting
+    void SetAppearanceStream(const PdfXObject& xobj, PdfSetAppearanceFlags flags = PdfSetAppearanceFlags::None,
+        PdfAppearanceType appearance = PdfAppearanceType::Normal, const PdfName& state = { });
+    void SetAppearanceStream(PdfXObject& xobj, PdfSetAppearanceFlags flags,
+        PdfAppearanceType appearance = PdfAppearanceType::Normal, const PdfName& state = { });
+    void SetAppearanceStream(const PdfXObject& xobj, PdfAppearanceType appearance, const PdfName& state = { });
 
-    /** Set an appearance stream for this object
-     *  to specify its visual appearance without handling page rotations
-     *  \param xobj an XObject form
-     *  \param appearance an appearance type to set
-     *  \param state the state for which set it the obj; states depend on the annotation type
-     */
-    void SetAppearanceStreamRaw(const PdfXObjectForm& xobj, PdfAppearanceType appearance = PdfAppearanceType::Normal, const PdfName& state = "");
+    /// Set an appearance stream for this object
+    /// to specify its visual appearance
+    /// @param xobj an XObject form
+    /// @param appearance an appearance type to set
+    /// @param state the state for which set it the obj; states depend on the annotation type
+    /// @param skipSelectedState skip setting the selected state, if non null
+    [[deprecated("Use the SetAppearanceStream methods with flags instead")]]
+    void SetAppearanceStream(const PdfXObject& xobj, PdfAppearanceType appearance,
+        const PdfName& state, bool skipSelectedState);
 
-    /** Get a list of qualified appearance streams
-     */
+    /// Set an appearance stream for this object
+    /// to specify its visual appearance without handling page rotations
+    /// @param xobj an XObject form
+    /// @param appearance an appearance type to set
+    /// @param state the state for which set it the obj; states depend on the annotation type
+    /// @param skipSelectedState skip setting the selected state, if non null
+    [[deprecated("Use the SetAppearanceStream methods with flags instead")]]
+    void SetAppearanceStreamRaw(const PdfXObject& xobj, PdfAppearanceType appearance = PdfAppearanceType::Normal,
+        const PdfName& state = { }, bool skipSelectedState = false);
+
+    /// Get a list of qualified appearance streams
+     ///  @param states a vector to receive the appearance streams
     void GetAppearanceStreams(std::vector<PdfAppearanceStream>& states) const;
 
     void ClearAppearances();
 
-    /**
-    * \returns the appearance /AP object for this annotation
-    */
+    /// @returns the appearance /AP object for this annotation
     PdfObject* GetAppearanceDictionaryObject();
     const PdfObject* GetAppearanceDictionaryObject() const;
 
-    /**
-    * \returns the appearance stream for this object
-     *  \param appearance an appearance type to get
-     *  \param state a child state. Meaning depends on the annotation type
-    */
+    /// @returns the appearance stream for this object
+    /// @param appearance an appearance type to get
+    /// @param state a child state. Meaning depends on the annotation type
     PdfObject* GetAppearanceStream(PdfAppearanceType appearance = PdfAppearanceType::Normal, const std::string_view& state = { });
     const PdfObject* GetAppearanceStream(PdfAppearanceType appearance = PdfAppearanceType::Normal, const std::string_view& state = { }) const;
 
-    /** Get the rectangle of this annotation.
-     *  \returns a rectangle
-     */
+    /// Get the rectangle of this annotation.
+    /// @returns a rectangle. It's oriented according to the canonical PDF coordinate system
     Rect GetRect() const;
-    Rect GetRectRaw() const;
 
-    /** Set the rectangle of this annotation.
-     * \param rect rectangle to set
-     */
+    /// Set the rectangle of this annotation.
+    /// @param rect rectangle to set. It's oriented according to the canonical PDF coordinate system
     void SetRect(const Rect& rect);
-    void SetRectRaw(const Rect& rect);
 
-    /** Set the flags of this annotation.
-     *  \see GetFlags
-     */
+    Corners GetRectRaw() const;
+
+    void SetRectRaw(const Corners& rect);
+
+    /// Set the flags of this annotation.
+    /// @see GetFlags
     void SetFlags(PdfAnnotationFlags flags);
 
-    /** Get the flags of this annotation.
-     *  \returns the flags which is an unsigned 32bit integer with different
-     *           PdfAnnotationFlags OR'ed together.
-     *
-     *  \see SetFlags
-     */
+    /// Get the flags of this annotation.
+    /// @returns the flags which is an unsigned 32bit integer with different
+    ///           PdfAnnotationFlags OR'ed together.
+    ///
+    /// @see SetFlags
     PdfAnnotationFlags GetFlags() const;
 
-    /** Set the annotations border style.
-     *  \param hCorner horitzontal corner radius
-     *  \param vCorner vertical corner radius
-     *  \param width width of border
-     */
+    /// Set the annotations border style.
+    /// @param hCorner horizontal corner radius
+    /// @param vCorner vertical corner radius
+    /// @param width width of border
     void SetBorderStyle(double hCorner, double vCorner, double width);
 
-    /** Set the annotations border style.
-     *  \param hCorner horitzontal corner radius
-     *  \param dVCorner vertical corner radius
-     *  \param width width of border
-     *  \param strokeStyle a custom stroke style pattern
-     */
+    /// Set the annotations border style.
+    /// @param hCorner horizontal corner radius
+    /// @param vCorner vertical corner radius
+    /// @param width width of border
+    /// @param strokeStyle a custom stroke style pattern
     void SetBorderStyle(double hCorner, double vCorner, double width, const PdfArray& strokeStyle);
 
-    /** Set the title of this annotation.
-     *  \param title title of the annotation as string in PDF format
-     *
-     *  \see GetTitle
-     */
+    /// Set the title of this annotation.
+    /// @param title title of the annotation as string in PDF format
+    ///
+    /// @see GetTitle
     void SetTitle(nullable<const PdfString&> title);
 
-    /** Get the title of this annotation
-     *
-     *  \returns the title of this annotation
-     *
-     *  \see SetTitle
-     */
+    /// Get the title of this annotation
+    ///
+    /// @returns the title of this annotation
+    ///
+    /// @see SetTitle
     nullable<const PdfString&> GetTitle() const;
 
-    /** Set the text of this annotation.
-     *
-     *  \param contents text of the annotation as string in PDF format
-     *
-     *  \see GetContents
-     */
+    /// Set the text of this annotation.
+    ///
+    /// @param contents text of the annotation as string in PDF format
+    ///
+    /// @see GetContents
     void SetContents(nullable<const PdfString&> contents);
 
-    /** Get the text of this annotation
-     *
-     *  \returns the contents of this annotation
-     *
-     *  \see SetContents
-     */
+    /// Get the text of this annotation
+    ///
+    /// @returns the contents of this annotation
+    ///
+    /// @see SetContents
     nullable<const PdfString&> GetContents() const;
 
-    /** Get the color key of the Annotation dictionary
-     *  which defines the color of the annotation,
-     *  as per 8.4 of the pdf spec.
-     */
-
+    /// Get the color key of the Annotation dictionary
+    /// which defines the color of the annotation,
+    /// as per 8.4 of the pdf spec.
+    ///
+    /// @returns the color of the annotation
     PdfColor GetColor() const;
 
-    /** Set the C key of the Annotation dictionary, which defines the
-     *  color of the annotation, as per 8.4 of the pdf spec.
-     */
+    /// Set the C key of the Annotation dictionary, which defines the
+    /// color of the annotation, as per 8.4 of the pdf spec.
+    /// @param color the color of the annotation
     void SetColor(nullable<const PdfColor&> color);
 
 public:
-    /** Get the type of this annotation
-     *  \returns the annotation type
-     */
+    /// Get the type of this annotation
+    /// @returns the annotation type
     inline PdfAnnotationType GetType() const { return m_AnnotationType; }
 
-    /** Get the page of this PdfField
-     *
-     *  \returns the page of this PdfField
-     */
+    /// Get the page of this PdfField
+    ///
+    /// @returns the page of this PdfField
     inline PdfPage* GetPage() { return m_Page; }
     inline const PdfPage* GetPage() const { return m_Page; }
     PdfPage& MustGetPage();
     const PdfPage& MustGetPage() const;
 
 private:
-    static std::unique_ptr<PdfAnnotation> Create(PdfPage& page, PdfAnnotationType annotType, const Rect& rect);
+    template <typename TAnnot>
+    static constexpr PdfAnnotationType GetAnnotationType();
 
-    static std::unique_ptr<PdfAnnotation> Create(PdfPage& page, const std::type_info& typeInfo, const Rect& rect);
+    static std::unique_ptr<PdfAnnotation> Create(PdfPage& page, PdfAnnotationType annotType, const Rect& rect);
 
     void SetPage(PdfPage& page) { m_Page = &page; }
 
 private:
+    void setAppearanceStream(PdfXObject& xobj, PdfSetAppearanceFlags flags, PdfAppearanceType appearance, const PdfName& state);
     static bool tryCreateFromObject(const PdfObject& obj, PdfAnnotationType targetType, PdfAnnotation*& xobj);
-    static bool tryCreateFromObject(const PdfObject& obj, const std::type_info& typeInfo, PdfAnnotation*& xobj);
-    static PdfAnnotationType getAnnotationType(const std::type_info& typeInfo);
     static PdfAnnotationType getAnnotationType(const PdfObject& obj);
     PdfObject* getAppearanceStream(PdfAppearanceType appearance, const std::string_view& state) const;
     PdfDictionary* getAppearanceDictionary() const;
@@ -237,7 +275,7 @@ template<typename TAnnotation>
 bool PdfAnnotation::TryCreateFromObject(PdfObject& obj, std::unique_ptr<TAnnotation>& xobj)
 {
     PdfAnnotation* xobj_;
-    if (!tryCreateFromObject(obj, typeid(TAnnotation), xobj_))
+    if (!tryCreateFromObject(obj, GetAnnotationType<TAnnotation>(), xobj_))
         return false;
 
     xobj.reset((TAnnotation*)xobj_);
@@ -248,13 +286,80 @@ template<typename TAnnotation>
 bool PdfAnnotation::TryCreateFromObject(const PdfObject& obj, std::unique_ptr<const TAnnotation>& xobj)
 {
     PdfAnnotation* xobj_;
-    if (!tryCreateFromObject(obj, typeid(TAnnotation), xobj_))
+    if (!tryCreateFromObject(obj, GetAnnotationType<TAnnotation>(), xobj_))
         return false;
 
     xobj.reset((const TAnnotation*)xobj_);
     return true;
 }
 
+template<typename TAnnot>
+constexpr PdfAnnotationType PdfAnnotation::GetAnnotationType()
+{
+    if (std::is_same_v<TAnnot, PdfAnnotationText>)
+        return PdfAnnotationType::Text;
+    else if (std::is_same_v<TAnnot, PdfAnnotationLink>)
+        return PdfAnnotationType::Link;
+    else if (std::is_same_v<TAnnot, PdfAnnotationFreeText>)
+        return PdfAnnotationType::FreeText;
+    else if (std::is_same_v<TAnnot, PdfAnnotationLine>)
+        return PdfAnnotationType::Line;
+    else if (std::is_same_v<TAnnot, PdfAnnotationSquare>)
+        return PdfAnnotationType::Square;
+    else if (std::is_same_v<TAnnot, PdfAnnotationCircle>)
+        return PdfAnnotationType::Circle;
+    else if (std::is_same_v<TAnnot, PdfAnnotationPolygon>)
+        return PdfAnnotationType::Polygon;
+    else if (std::is_same_v<TAnnot, PdfAnnotationPolyLine>)
+        return PdfAnnotationType::PolyLine;
+    else if (std::is_same_v<TAnnot, PdfAnnotationHighlight>)
+        return PdfAnnotationType::Highlight;
+    else if (std::is_same_v<TAnnot, PdfAnnotationUnderline>)
+        return PdfAnnotationType::Underline;
+    else if (std::is_same_v<TAnnot, PdfAnnotationSquiggly>)
+        return PdfAnnotationType::Squiggly;
+    else if (std::is_same_v<TAnnot, PdfAnnotationStrikeOut>)
+        return PdfAnnotationType::StrikeOut;
+    else if (std::is_same_v<TAnnot, PdfAnnotationStamp>)
+        return PdfAnnotationType::Stamp;
+    else if (std::is_same_v<TAnnot, PdfAnnotationCaret>)
+        return PdfAnnotationType::Caret;
+    else if (std::is_same_v<TAnnot, PdfAnnotationInk>)
+        return PdfAnnotationType::Ink;
+    else if (std::is_same_v<TAnnot, PdfAnnotationPopup>)
+        return PdfAnnotationType::Popup;
+    else if (std::is_same_v<TAnnot, PdfAnnotationFileAttachment>)
+        return PdfAnnotationType::FileAttachement;
+    else if (std::is_same_v<TAnnot, PdfAnnotationSound>)
+        return PdfAnnotationType::Sound;
+    else if (std::is_same_v<TAnnot, PdfAnnotationMovie>)
+        return PdfAnnotationType::Movie;
+    else if (std::is_same_v<TAnnot, PdfAnnotationWidget>)
+        return PdfAnnotationType::Widget;
+    else if (std::is_same_v<TAnnot, PdfAnnotationScreen>)
+        return PdfAnnotationType::Screen;
+    else if (std::is_same_v<TAnnot, PdfAnnotationPrinterMark>)
+        return PdfAnnotationType::PrinterMark;
+    else if (std::is_same_v<TAnnot, PdfAnnotationTrapNet>)
+        return PdfAnnotationType::TrapNet;
+    else if (std::is_same_v<TAnnot, PdfAnnotationWatermark>)
+        return PdfAnnotationType::Watermark;
+    else if (std::is_same_v<TAnnot, PdfAnnotationModel3D>)
+        return PdfAnnotationType::Model3D;
+    else if (std::is_same_v<TAnnot, PdfAnnotationRichMedia>)
+        return PdfAnnotationType::RichMedia;
+    else if (std::is_same_v<TAnnot, PdfAnnotationWebMedia>)
+        return PdfAnnotationType::WebMedia;
+    else if (std::is_same_v<TAnnot, PdfAnnotationRedact>)
+        return PdfAnnotationType::Redact;
+    else if (std::is_same_v<TAnnot, PdfAnnotationProjection>)
+        return PdfAnnotationType::Projection;
+    else
+        return PdfAnnotationType::Unknown;
+}
+
 };
+
+ENABLE_BITMASK_OPERATORS(PoDoFo::PdfSetAppearanceFlags);
 
 #endif // PDF_ANNOTATION_H

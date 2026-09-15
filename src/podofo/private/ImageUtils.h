@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef IMAGE_UTILS_H
 #define IMAGE_UTILS_H
@@ -18,16 +15,14 @@
 
 namespace utls
 {
-    /** Fetch a RGB image and write it to the stream
-     */
+    /// Fetch a RGB image and write it to the stream
     void FetchImage(PoDoFo::OutputStream& stream, PoDoFo::PdfPixelFormat format, int scanLineSize,
         const unsigned char* imageData, unsigned width, unsigned heigth, unsigned bitsPerComponent,
         const PoDoFo::PdfColorSpaceFilter& filter, const PoDoFo::charbuff& smaskData);
 
-    /** Fetch a Black and White image and write it to the stream
-     */
+    /// Fetch a Black and White image and write it to the stream
     void FetchImageCCITT(PoDoFo::OutputStream& stream, PoDoFo::PdfPixelFormat format, int scanLineSize,
-        fxcodec::ScanlineDecoder& decoder, unsigned width, unsigned heigth, const PoDoFo::charbuff& smaskData);
+        chromium::ScanlineDecoder& decoder, unsigned width, unsigned heigth, const PoDoFo::charbuff& smaskData);
 
 #ifdef PODOFO_HAVE_JPEG_LIB
     void FetchImageJPEG(PoDoFo::OutputStream& stream, PoDoFo::PdfPixelFormat format, int scanLineSize,

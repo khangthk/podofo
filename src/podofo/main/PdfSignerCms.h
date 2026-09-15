@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2023 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2023 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_SIGNER_CMS_H
 #define PDF_SIGNER_CMS_H
@@ -12,8 +9,11 @@
 
 extern "C"
 {
-    // OpenSSL forward 
+    // OpenSSL forward declaration
     struct evp_pkey_st;
+    // libxml2 forward declaration
+    typedef struct _xmlNode xmlNode;
+    typedef xmlNode* xmlNodePtr;
 }
 
 namespace PoDoFo
@@ -23,23 +23,40 @@ namespace PoDoFo
     using PdfSigningService = std::function<void(bufferview hashToSign, bool dryrun, charbuff& signedHash)>;
     using PdfSignedHashHandler = std::function<void(bufferview signedhHash, bool dryrun)>;
 
-    enum class PdfSignerCmsFlags
+    enum class PdfSignerCmsFlags : uint32_t
     {
         None = 0,
         ///< When supplying a PdfSigningService, specify if the service
         ///< expects a bare digest (the default), or if should be wrapped
         ///< in a ASN.1 structure with encryption and hashing type (PKCS#1 v1.5
-        ///< encpasulation), and the signing service will just perform an
+        ///< encapsulation), and the signing service will just perform an
         ///< encryption with private key
         ServiceDoWrapDigest = 1,
         ///< When supplying an external PdfSigningService, specify if
         ///< the service should be called for a dry run
         ServiceDoDryRun = 2,
+        ///< For signing algorithms that have a random component, make it deterministic
+        ///< Applies to ECDSA, ML-DSA, SLH-DSA
+        Deterministic = 4,
+        ///< Skip the inline verification of the signed hash supplied by an external signing
+        ///< service or by a deferred signing. The verification is performed by default as a
+        ///< cross-check of the supplied signed hash, and it's never performed when a private
+        ///< key is supplied or during dry runs
+        SkipVerification = 8,
+        ///< Skip the validation of the signature date against the validity period of the
+        ///< supplied certificate. The validation is performed by default and a missing
+        ///< signature date makes it fail
+        SkipDateValidation = 16,
     };
 
+    // NOTE: The deprecated Encryption field below will cause deprecation warnings
+    // because of implictly generated costructors, hence we suppress warnings for
+    // the whole struct
+    PODOFO_SUPPRESS_DEPRECATED_PUSH
     struct PODOFO_API PdfSignerCmsParams final
     {
         PdfSignatureType SignatureType = PdfSignatureType::PAdES_B;
+        [[deprecated("Unused: the signing algorithm is automatically detected from the public key in the certificate")]]
         PdfSignatureEncryption Encryption = PdfSignatureEncryption::RSA;
         PdfHashingAlgorithm Hashing = PdfHashingAlgorithm::SHA256;
         PdfSigningService SigningService;
@@ -47,8 +64,9 @@ namespace PoDoFo
         PdfSignedHashHandler SignedHashHandler;
         PdfSignerCmsFlags Flags = PdfSignerCmsFlags::None;
     };
+    PODOFO_SUPPRESS_DEPRECATED_POP
 
-    enum class PdfSignatureAttributeFlags
+    enum class PdfSignatureAttributeFlags : uint32_t
     {
         None = 0,
         ///< The attribute is a signed attribute. By default, it is unsigned
@@ -57,63 +75,74 @@ namespace PoDoFo
         AsOctetString = 2,
     };
 
-    /** This class computes a CMS signature according to RFC 5652
-     */
+    /// This class computes a CMS signature according to RFC 5652
     class PODOFO_API PdfSignerCms : public PdfSigner
     {
+        friend class PdfSigningContext;
     public:
-        /** Load X.509 certificate and supply a ASN.1 DER encoded private key
-         * \param cert ASN.1 DER encoded X.509 certificate
-         * \param pkey ASN.1 DER encoded private key (PKCS#1 or PKCS#8) formats. It can be empty.
-         * In that case signing can be supplied by a signing service, or
-         * performing a sequential signing
-         */
+        /// Load X.509 certificate and supply a ASN.1 DER encoded private key
+        /// @param cert ASN.1 DER encoded X.509 certificate
+        /// @param pkey ASN.1 DER encoded private key (PKCS#1 or PKCS#8) formats. It can be empty.
+        /// In that case signing can be supplied by a signing service, or
+        /// performing a deferred signing
         PdfSignerCms(const bufferview& cert, const bufferview& pkey,
             const PdfSignerCmsParams& parameters = { });
 
-        /** Load a X.509 certificate without supplying a private key
-         * \param cert ASN.1 DER encoded X.509 certificate
-         * \remarks signing can be supplied by a signing service, or performing a sequential signing
-         */
+        /// Load a X.509 certificate without supplying a private key
+        /// @param cert ASN.1 DER encoded X.509 certificate
+        /// @remarks signing can be supplied by a signing service, or performing a deferred signing
         PdfSignerCms(const bufferview& cert, const PdfSignerCmsParams& parameters = { });
 
         ~PdfSignerCms();
 
+    private:
+        /// This is used for deserialization by PdfSigningContext
+        PdfSignerCms();
+
     public:
+        /// Validate the signature date against the certificate validity period
+        /// @param date the date of the signature field. A missing date makes the validation fail
+        /// @remarks it does nothing when PdfSignerCmsFlags::SkipDateValidation is set
+        void ValidateSignatureDate(const nullable<PdfDate>& date) override;
         void AppendData(const bufferview& data) override;
         void ComputeSignature(charbuff& buffer, bool dryrun) override;
         void FetchIntermediateResult(charbuff& result) override;
-        void ComputeSignatureSequential(const bufferview& processedResult, charbuff& contents, bool dryrun) override;
+        void ComputeSignatureDeferred(const bufferview& processedResult, charbuff& contents, bool dryrun) override;
         void Reset() override;
         std::string GetSignatureFilter() const override;
         std::string GetSignatureSubFilter() const override;
         std::string GetSignatureType() const override;
         bool SkipBufferClear() const override;
 
-        /** Add a signature attribute with given identifier from the input
-         * \param nid the numerical identifier
-         * \param attr the attribute bytes. By default, the bytes are parsed for valid ASN.1 input
-         */
+        /// Add a signature attribute with given identifier from the input
+        /// @param nid the numerical identifier
+        /// @param attr the attribute bytes. By default, the bytes are parsed for valid ASN.1 input
         void AddAttribute(const std::string_view& nid, const bufferview& attr, PdfSignatureAttributeFlags flags = PdfSignatureAttributeFlags::None);
 
-        /**
-         * Reserve some size in the final signature. It is used in dry-runs to enlarge the signature buffer
-         * \remarks the total reserved size is reset on Reset()
-         */
+        /// Reserve some size in the final signature. It is used in dry-runs to enlarge the signature buffer
+        /// @remarks the total reserved size is reset on Reset()
         void ReserveAttributeSize(unsigned attrSize);
 
     public:
+        unsigned GetSignedHashSize() const;
+
         const PdfSignerCmsParams& GetParameters() const { return m_parameters; }
 
     private:
+        // Called by PdfSigningContext
+        void Dump(xmlNodePtr signerElem, std::string& temp);
+        void Restore(xmlNodePtr signerElem, charbuff& temp);
+    private:
         void ensureEventBasedSigning();
-        void ensureSequentialSigning();
+        void ensureDeferredSigning();
         void checkContextInitialized();
         void ensureContextInitialized();
         void resetContext();
+        bool shouldVerify() const;
         void doSign(const bufferview& input, charbuff& output);
+        void tryEnlargeSignatureContents(charbuff& contents);
     private:
-        nullable<bool> m_sequentialSigning;
+        nullable<bool> m_deferredSigning;
         charbuff m_certificate;
         std::unique_ptr<CmsContext> m_cmsContext;
         struct evp_pkey_st* m_privKey;

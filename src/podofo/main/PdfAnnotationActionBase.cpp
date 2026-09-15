@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfAnnotationActionBase.h"
@@ -28,7 +25,7 @@ void PdfAnnotationActionBase::SetAction(nullable<const PdfAction&> action)
     if (action == nullptr)
     {
         dict.RemoveKey("A");
-        m_Action = { };
+        m_Action *= nullptr;
     }
     else
     {
@@ -55,7 +52,7 @@ void PdfAnnotationActionBase::onActionSet()
 
 void PdfAnnotationActionBase::ResetAction()
 {
-    m_Action = { };
+    m_Action *= nullptr;
     GetDictionary().RemoveKey("A");
 }
 
@@ -66,13 +63,15 @@ nullable<PdfAction&> PdfAnnotationActionBase::getAction()
         auto obj = GetDictionary().FindKey("A");
         if (obj == nullptr)
         {
-            m_Action = { };
+            m_Action *= nullptr;
         }
         else
         {
             unique_ptr<PdfAction> action;
             if (PdfAction::TryCreateFromObject(*obj, action))
                 m_Action = std::move(action);
+            else
+                m_Action *= nullptr;
         }
     }
 

@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfFieldChildrenCollection.h"
@@ -114,7 +111,7 @@ PdfFieldChildrenCollectionBase::const_iterator PdfFieldChildrenCollectionBase::e
     return m_Fields.end();
 }
 
-PdfField& PdfFieldChildrenCollectionBase::AddChild(const shared_ptr<PdfField>& field)
+PdfField& PdfFieldChildrenCollectionBase::AddChild(shared_ptr<PdfField> field)
 {
     PODOFO_ASSERT(field != nullptr);
     if (m_kidsArray == nullptr)
@@ -123,7 +120,7 @@ PdfField& PdfFieldChildrenCollectionBase::AddChild(const shared_ptr<PdfField>& f
     m_fieldMap[field->GetObject().GetIndirectReference()] = m_kidsArray->GetSize();
     m_kidsArray->AddIndirectSafe(field->GetObject());
     auto ret = field.get();
-    m_Fields.push_back(field);
+    m_Fields.push_back(std::move(field));
     return *ret;
 }
 

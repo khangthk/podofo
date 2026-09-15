@@ -1,9 +1,7 @@
-/**
- * SPDX-FileCopyrightText: (C) 2005 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
 #include "PdfDeclarationsPrivate.h"
+// SPDX-FileCopyrightText: 2005 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <regex>
 #include <podofo/private/utfcpp_extensions.h>
@@ -13,16 +11,23 @@
 
 #include <podofo/private/istringviewstream.h>
 
-#include <podofo/private/utfcpp_extensions.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <podofo/private/WindowsLeanMean.h>
-#else
+#include <io.h>
+#include <share.h>
+#else // !_WIN32
  // NOTE: There's no <cstrings>, <strings.h> is a posix header
 #include <strings.h>
-#endif
+#endif // _WIN32
+
+#include "PdfTreeNode.h"
 
 #include <podofo/main/PdfCommon.h>
+#include <podofo/main/PdfElement.h>
+#include <podofo/main/PdfDocument.h>
 
 using namespace std;
 using namespace PoDoFo;
@@ -40,12 +45,11 @@ extern PODOFO_IMPORT LogMessageCallback s_LogMessageCallback;
 static char getEscapedCharacter(char ch);
 static void removeTrailingZeroes(string& str, size_t len);
 static bool isStringDelimter(char32_t ch);
-static string extractFontHints(const std::string_view& fontName,
-    bool trimSubsetPrefix, bool& isItalic, bool& isBold);
+static void extractFontHints(string& fontName, bool& isItalic, bool& isBold);
 static bool trimSuffix(string& name, const string_view& suffix);
 static double modulo(double a, double b);
 
-// Picked as the minimum size for small string optimizations withing GCC, MSVC, Clang
+// Picked as the minimum size for small string optimizations within GCC, MSVC, Clang
 constexpr unsigned FloatFormatDefaultSize = 15;
 
 struct VersionIdentity
@@ -156,6 +160,19 @@ const PdfName& PoDoFo::GetPdfVersionName(PdfVersion version)
             return s_PdfVersions[8].Name;
         default:
             PODOFO_RAISE_ERROR(PdfErrorCode::InvalidEnumValue);
+    }
+}
+
+bool PoDoFo::IsAccessibiltyProfile(PdfALevel pdfaLevel)
+{
+    switch (pdfaLevel)
+    {
+        case PdfALevel::L1A:
+        case PdfALevel::L2A:
+        case PdfALevel::L3A:
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -279,7 +296,7 @@ vector<string> PoDoFo::ToPdfKeywordsList(const string_view& str)
             case U'\r':
             case U'\n':
             {
-                token = string(tokenStart, it);
+                token = string(tokenStart, std::prev(it));
                 if (token.length() != 0)
                     ret.push_back(std::move(token));
                 tokenStart = it;
@@ -295,16 +312,29 @@ vector<string> PoDoFo::ToPdfKeywordsList(const string_view& str)
     return ret;
 }
 
-string PoDoFo::NormalizeFontName(const string_view& fontName)
+string PoDoFo::ExtractBaseFontName(const string_view& fontName, bool skipTrimSubset)
 {
     bool isItalic;
     bool isBold;
-    return extractFontHints(fontName, false, isItalic, isBold);
+    if (skipTrimSubset)
+    {
+        string name(fontName);
+        extractFontHints(name, isItalic, isBold);
+        return name;
+    }
+    else
+    {
+        string name(fontName.substr(PoDoFo::GetSubsetPrefixLength(fontName)));
+        extractFontHints(name, isItalic, isBold);
+        return name;
+    }
 }
 
 string PoDoFo::ExtractFontHints(const string_view& fontName, bool& isItalic, bool& isBold)
 {
-    return extractFontHints(fontName, true, isItalic, isBold);
+    string name(fontName);
+    extractFontHints(name, isItalic, isBold);
+    return name;
 }
 
 char PoDoFo::XRefEntryTypeToChar(PdfXRefEntryType type)
@@ -335,31 +365,272 @@ PdfXRefEntryType PoDoFo::XRefEntryTypeFromChar(char c)
     }
 }
 
+int PoDoFo::GetOperandCount(PdfOperator op)
+{
+    int count;
+    if (!TryGetOperandCount(op, count))
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidEnumValue, "Invalid operator");
+
+    return count;
+}
+
+bool PoDoFo::TryGetOperandCount(PdfOperator op, int& count)
+{
+    switch (op)
+    {
+        case PdfOperator::w:
+            count = 1;
+            return true;
+        case PdfOperator::J:
+            count = 1;
+            return true;
+        case PdfOperator::j:
+            count = 1;
+            return true;
+        case PdfOperator::M:
+            count = 1;
+            return true;
+        case PdfOperator::d:
+            count = 2;
+            return true;
+        case PdfOperator::ri:
+            count = 1;
+            return true;
+        case PdfOperator::i:
+            count = 1;
+            return true;
+        case PdfOperator::gs:
+            count = 1;
+            return true;
+        case PdfOperator::q:
+            count = 0;
+            return true;
+        case PdfOperator::Q:
+            count = 0;
+            return true;
+        case PdfOperator::cm:
+            count = 6;
+            return true;
+        case PdfOperator::m:
+            count = 2;
+            return true;
+        case PdfOperator::l:
+            count = 2;
+            return true;
+        case PdfOperator::c:
+            count = 6;
+            return true;
+        case PdfOperator::v:
+            count = 4;
+            return true;
+        case PdfOperator::y:
+            count = 4;
+            return true;
+        case PdfOperator::h:
+            count = 0;
+            return true;
+        case PdfOperator::re:
+            count = 4;
+            return true;
+        case PdfOperator::S:
+            count = 0;
+            return true;
+        case PdfOperator::s:
+            count = 0;
+            return true;
+        case PdfOperator::f:
+            count = 0;
+            return true;
+        case PdfOperator::F:
+            count = 0;
+            return true;
+        case PdfOperator::f_Star:
+            count = 0;
+            return true;
+        case PdfOperator::B:
+            count = 0;
+            return true;
+        case PdfOperator::B_Star:
+            count = 0;
+            return true;
+        case PdfOperator::b:
+            count = 0;
+            return true;
+        case PdfOperator::b_Star:
+            count = 0;
+            return true;
+        case PdfOperator::n:
+            count = 0;
+            return true;
+        case PdfOperator::W:
+            count = 0;
+            return true;
+        case PdfOperator::W_Star:
+            count = 0;
+            return true;
+        case PdfOperator::BT:
+            count = 0;
+            return true;
+        case PdfOperator::ET:
+            count = 0;
+            return true;
+        case PdfOperator::Tc:
+            count = 1;
+            return true;
+        case PdfOperator::Tw:
+            count = 1;
+            return true;
+        case PdfOperator::Tz:
+            count = 1;
+            return true;
+        case PdfOperator::TL:
+            count = 1;
+            return true;
+        case PdfOperator::Tf:
+            count = 2;
+            return true;
+        case PdfOperator::Tr:
+            count = 1;
+            return true;
+        case PdfOperator::Ts:
+            count = 1;
+            return true;
+        case PdfOperator::Td:
+            count = 2;
+            return true;
+        case PdfOperator::TD:
+            count = 2;
+            return true;
+        case PdfOperator::Tm:
+            count = 6;
+            return true;
+        case PdfOperator::T_Star:
+            count = 0;
+            return true;
+        case PdfOperator::Tj:
+            count = 1;
+            return true;
+        case PdfOperator::TJ:
+            count = 1;
+            return true;
+        case PdfOperator::Quote:
+            count = 1;
+            return true;
+        case PdfOperator::DoubleQuote:
+            count = 3;
+            return true;
+        case PdfOperator::d0:
+            count = 2;
+            return true;
+        case PdfOperator::d1:
+            count = 6;
+            return true;
+        case PdfOperator::CS:
+            count = 1;
+            return true;
+        case PdfOperator::cs:
+            count = 1;
+            return true;
+        case PdfOperator::SC:
+            count = -1;
+            return true;
+        case PdfOperator::SCN:
+            count = -1;
+            return true;
+        case PdfOperator::sc:
+            count = -1;
+            return true;
+        case PdfOperator::scn:
+            count = -1;
+            return true;
+        case PdfOperator::G:
+            count = 1;
+            return true;
+        case PdfOperator::g:
+            count = 1;
+            return true;
+        case PdfOperator::RG:
+            count = 3;
+            return true;
+        case PdfOperator::rg:
+            count = 3;
+            return true;
+        case PdfOperator::K:
+            count = 4;
+            return true;
+        case PdfOperator::k:
+            count = 4;
+            return true;
+        case PdfOperator::sh:
+            count = 1;
+            return true;
+        case PdfOperator::BI:
+            count = 0;
+            return true;
+        case PdfOperator::ID:
+            count = 0;
+            return true;
+        case PdfOperator::EI:
+            count = 0;
+            return true;
+        case PdfOperator::Do:
+            count = 1;
+            return true;
+        case PdfOperator::MP:
+            count = 1;
+            return true;
+        case PdfOperator::DP:
+            count = 2;
+            return true;
+        case PdfOperator::BMC:
+            count = 1;
+            return true;
+        case PdfOperator::BDC:
+            count = 2;
+            return true;
+        case PdfOperator::EMC:
+            count = 0;
+            return true;
+        case PdfOperator::BX:
+            count = 0;
+            return true;
+        case PdfOperator::EX:
+            count = 0;
+            return true;
+        default:
+        case PdfOperator::Unknown:
+            count = 0;
+            return false;
+    }
+}
+
 void PoDoFo::AddToCallStack(PdfError& err, string filepath, unsigned line, string information)
 {
     err.AddToCallStack(std::move(filepath), line, std::move(information));
 }
 
-// NOTE: This function is condsidered to be slow. Avoid calling it frequently
+unsigned char PoDoFo::GetSubsetPrefixLength(const string_view& fontName)
+{
+    // NOTE: For some reasons, "^[A-Z]{6}\+" doesn't work
+    regex regex = std::regex("^[A-Z][A-Z][A-Z][A-Z][A-Z][A-Z]\\+", regex_constants::ECMAScript);
+    smatch matches;
+    string name(fontName);
+    if (std::regex_search(name, matches, regex))
+    {
+        // 5.5.3 Font Subsets: Remove EOODIA+ like prefixes
+        return 7;
+    }
+
+    return 0;
+}
+
+// NOTE: This function is considered to be slow. Avoid calling it frequently
 // https://github.com/podofo/podofo/issues/30
-string extractFontHints(const string_view& fontName, bool trimSubsetPrefix, bool& isItalic, bool& isBold)
+void extractFontHints(string& name, bool& isItalic, bool& isBold)
 {
     // TABLE H.3 Names of standard fonts
-    string name = (string)fontName;
     isItalic = false;
     isBold = false;
-
-    if (trimSubsetPrefix)
-    {
-        // NOTE: For some reasons, "^[A-Z]{6}\+" doesn't work
-        regex regex = std::regex("^[A-Z][A-Z][A-Z][A-Z][A-Z][A-Z]\\+", regex_constants::ECMAScript);
-        smatch matches;
-        if (std::regex_search(name, matches, regex))
-        {
-            // 5.5.3 Font Subsets: Remove EOODIA+ like prefixes
-            name.erase(matches[0].first - name.begin(), 7);
-        }
-    }
 
     if (trimSuffix(name, "BoldItalic"))
     {
@@ -395,7 +666,6 @@ string extractFontHints(const string_view& fontName, bool trimSubsetPrefix, bool
 
     // 5.5.2 TrueType Fonts: If the name contains any spaces, the spaces are removed
     name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
-    return name;
 }
 
 string PoDoFo::ToPdfKeywordsString(const cspan<string>& keywords)
@@ -415,6 +685,82 @@ string PoDoFo::ToPdfKeywordsString(const cspan<string>& keywords)
     return ret;
 }
 
+void PoDoFo::CreateObjectStructElement(PdfDictionaryElement& elem, PdfPage& page, const PdfName& elementType)
+{
+    PdfDictionary* dict;
+    auto structTreeObj = elem.GetDocument().GetCatalog().GetStructTreeRootObject();
+    if (structTreeObj == nullptr || !structTreeObj->TryGetDictionary(dict))
+        return;
+
+    // Try to find a /Document struct element
+    PdfDictionary* elemDict = nullptr;
+    const PdfName* name;
+    auto kArr = dict->FindKeyAsSafe<PdfArray*>("K");
+    if (kArr == nullptr)
+    {
+        if (!dict->TryFindKeyAs("K", elemDict)
+            || !elemDict->TryFindKeyAs("S", name)
+            || *name != "Document")
+        {
+            return;
+        }
+    }
+    else
+    {
+        bool foundDocumentObj = false;
+        for (unsigned i = 0; i < kArr->GetSize(); i++)
+        {
+            if (kArr->TryFindAtAs(i, elemDict)
+                && elemDict->TryFindKeyAs("S", name)
+                && *name == "Document")
+            {
+                foundDocumentObj = true;
+                break;
+            }
+        }
+
+        if (!foundDocumentObj)
+            return;
+    }
+
+    kArr = elemDict->FindKeyAsSafe<PdfArray*>("K");
+    if (kArr == nullptr)
+    {
+        kArr = &elem.GetDocument().GetObjects().CreateArrayObject().GetArray();
+        elemDict->AddKeyIndirect("K"_n, *kArr->GetOwner());
+    }
+
+    // Create a struct element for the field
+    auto& fieldStructDict = elem.GetDocument().GetObjects().CreateDictionaryObject().GetDictionary();
+    kArr->AddIndirect(*fieldStructDict.GetOwner());
+    fieldStructDict.AddKey("S"_n, elementType);
+    fieldStructDict.AddKeyIndirect("P"_n, *elemDict->GetOwner());
+    elemDict = &fieldStructDict.AddKey("K", PdfDictionary()).GetDictionary();
+    elemDict->AddKey("Type"_n, PdfName("OBJR"));
+    elemDict->AddKeyIndirect("Pg"_n, page.GetObject());
+    elemDict->AddKeyIndirect("Obj"_n, elem.GetObject());
+
+    auto parentTreeDict = dict->FindKeyAsSafe<PdfDictionary*>("ParentTree");
+    if (parentTreeDict == nullptr)
+    {
+        parentTreeDict = &elem.GetDocument().GetObjects().CreateDictionaryObject().GetDictionary();
+        dict->AddKeyIndirect("ParentTree"_n, *parentTreeDict->GetOwner());
+    }
+
+    //  Determine the struct element key
+    PdfNumberTreeNode node(nullptr, *parentTreeDict->GetOwner());
+    int64_t structParentKey;
+    auto last = node.GetLast();
+    if (last == node.end())
+        structParentKey = 0;
+    else
+        structParentKey = last->first + 1;
+
+    // Set the struct element key id in the field and in the struct root tree
+    node.AddValue(structParentKey, *fieldStructDict.GetOwner());
+    elem.GetDictionary().AddKey("StructParent"_n, PdfObject(structParentKey));
+}
+
 const locale& utls::GetInvariantLocale()
 {
     return s_cachedLocale;
@@ -422,7 +768,8 @@ const locale& utls::GetInvariantLocale()
 
 string_view utls::GetEnvironmentVariable(const string_view& name)
 {
-    auto env = std::getenv(name.data());
+    // NOTE: getenv() requires a null terminated name
+    auto env = std::getenv(string(name).c_str());
     if (env == nullptr)
         return string_view();
     else
@@ -753,20 +1100,20 @@ void utls::CopyTo(ostream& dst, istream& src)
     } while (!eof);
 }
 
-void utls::ReadTo(charbuff& str, const string_view& filepath)
+void utls::ReadTo(charbuff& str, const string_view& filepath, size_t maxReadSize)
 {
     ifstream istream = utls::open_ifstream(filepath, ios_base::binary);
-    ReadTo(str, istream);
+    ReadTo(str, istream, maxReadSize);
 }
 
-void utls::ReadTo(charbuff& str, istream& stream)
+void utls::ReadTo(charbuff& str, istream& stream, size_t maxReadSize)
 {
     stream.seekg(0, ios::end);
     auto tellg = stream.tellg();
     if (tellg == -1)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidStream, "Error reading from stream");
 
-    str.resize((size_t)tellg);
+    str.resize(std::min((size_t)tellg, maxReadSize));
     stream.seekg(0, ios::beg);
     stream.read(str.data(), str.size());
     if (stream.fail())
@@ -804,7 +1151,7 @@ size_t utls::ReadBuffer(istream& stream, char* buffer, size_t size, bool& eof)
         (void)stream.rdstate();
 
         // On gcc (linux) 4.8.1 and VS2010/VS2013 (Windows 7) this consistently
-        // sets eofbit when stream is EOF for the conseguences  of sgetn(). It
+        // sets eofbit when stream is EOF for the consequences of sgetn(). It
         // should also throw if exceptions are set, or return on the contrary,
         // and previous rdstate() restored a failbit on Windows. On Windows most
         // of the times it sets eofbit even on real read failure
@@ -856,21 +1203,25 @@ FILE* utls::fopen(const string_view& filename, const string_view& mode)
 #endif
 }
 
-ssize_t utls::ftell(FILE* file)
+int utls::openFd(const string_view& filepath, int flags)
 {
-#if defined(_WIN64)
-    return _ftelli64(file);
-#else
-    return std::ftell(file);
-#endif
-}
+#ifdef _WIN32
+    auto filepath16 = utf8::utf8to16((string)filepath);
+    int fd;
+    // NOTE: _SH_DENYNO matches the default sharing of _wfopen. The
+    // permissions are required by _O_CREAT and ignored otherwise:
+    // passing _S_IREAD alone would create a read only file
+    if (_wsopen_s(&fd, (wchar_t*)filepath16.c_str(), flags | _O_BINARY,
+        _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0)
+    {
+        return -1;
+    }
 
-ssize_t utls::fseek(FILE* file, ssize_t offset, int origin)
-{
-#if defined(_WIN64)
-    return _fseeki64(file, offset, origin);
+    return fd;
 #else
-    return std::fseek(file, offset, origin);
+    // NOTE: open() requires a null terminated path. The permissions
+    // are narrowed by the process umask, as fopen() does
+    return ::open(string(filepath).c_str(), flags, 0666);
 #endif
 }
 
@@ -913,13 +1264,50 @@ void utls::WriteCharHexTo(char buf[2], char ch)
     buf[1] += (buf[1] > 9 ? 'A' - 10 : '0');
 }
 
-string utls::GetCharHexString(const bufferview& buff)
+string utls::GetHexString(const bufferview& buff)
 {
     string ret(buff.size() * 2, '\0');
     for (unsigned i = 0; i < buff.size(); i++)
         utls::WriteCharHexTo(ret.data() + i * 2, buff[i]);
 
     return ret;
+}
+
+void utls::WriteHexStringTo(string& str, const bufferview& buff)
+{
+    str.resize(buff.size() * 2, '\0');
+    for (unsigned i = 0; i < buff.size(); i++)
+        utls::WriteCharHexTo(str.data() + i * 2, buff[i]);
+}
+
+void utls::DecodeHexStringTo(charbuff& buffer, const string_view& hexView)
+{
+    size_t len = hexView.size();
+    buffer.clear();
+    buffer.reserve(len % 2 ? (len + 1) >> 1 : len >> 1);
+
+    unsigned char val;
+    char decodedChar = 0;
+    bool low = true;
+    for (size_t i = 0; i < len; i++)
+    {
+        char ch = hexView[i];
+        if (PoDoFo::IsCharWhitespace(ch))
+            continue;
+
+        (void)utls::TryGetHexValue(ch, val);
+        if (low)
+        {
+            decodedChar = (char)(val & 0x0F);
+            low = false;
+        }
+        else
+        {
+            decodedChar = (char)((decodedChar << 4) | val);
+            low = true;
+            buffer.push_back(decodedChar);
+        }
+    }
 }
 
 void utls::WriteUtf16BETo(u16string& str, char32_t codePoint)
@@ -1033,6 +1421,16 @@ string utls::Trim(const string_view& str, char ch)
     return ret;
 }
 
+void utls::Replace(string& str, const string_view& from, const string_view& to)
+{
+    size_t start_pos = str.find(from);
+    if (start_pos == string_view::npos)
+        return;
+
+    str.replace(start_pos, from.length(), to);
+    return;
+}
+
 void utls::ByteSwap(u16string& str)
 {
     for (unsigned i = 0; i < str.length(); i++)
@@ -1099,6 +1497,24 @@ double utls::NormalizeCircularRange(double value, double start, double end)
 double modulo(double a, double b)
 {
     return std::fmod((std::fmod(a, b)) + b, b);
+}
+
+void utls::NormalizeCoordinates(double& x1, double& y1, double& x2, double& y2)
+{
+    double temp;
+    if (x1 > x2)
+    {
+        temp = x1;
+        x1 = x2;
+        x2 = temp;
+    }
+
+    if (y1 > y2)
+    {
+        temp = y1;
+        y1 = y2;
+        y2 = temp;
+    }
 }
 
 void utls::SerializeEncodedString(OutputStream& stream, const string_view& encoded, bool wantHex, bool skipDelimiters)
@@ -1182,25 +1598,25 @@ bool utls::DoesMultiplicationOverflow(size_t op1, size_t op2)
 
 string utls::GetWin32ErrorMessage(unsigned rc)
 {
-    LPWSTR psz{ nullptr };
-    const DWORD cchMsg = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM
+    LPWSTR str{ nullptr };
+    DWORD strLength = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM
         | FORMAT_MESSAGE_IGNORE_INSERTS
         | FORMAT_MESSAGE_ALLOCATE_BUFFER,
         NULL, // (not used with FORMAT_MESSAGE_FROM_SYSTEM)
         rc,
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        reinterpret_cast<LPWSTR>(&psz),
+        reinterpret_cast<LPWSTR>(&str),
         0,
         NULL);
 
-    if (cchMsg == 0)
+    if (strLength == 0)
         return string();
 
     // Assign buffer to smart pointer with custom deleter so that memory gets released
     // in case String's c'tor throws an exception.
     auto deleter = [](void* p) { ::LocalFree(p); };
-    unique_ptr<WCHAR, decltype(deleter)> ptrBuffer(psz, deleter);
-    return utf8::utf16to8((char16_t*)psz);
+    unique_ptr<WCHAR, decltype(deleter)> ptrBuffer(str, deleter);
+    return utf8::utf16to8(u16string_view((char16_t*)str, strLength));
 }
 
 #endif // _WIN322
@@ -1385,9 +1801,9 @@ void utls::ReadInt32BE(const char* buf, int32_t& value)
 void utls::ReadUInt24BE(const char* buf, uint24_t& value)
 {
     uint32_t intValue =
-          (int32_t)((uint8_t)buf[3] << 0)
-        | (int32_t)((uint8_t)buf[2] << 8)
-        | (int32_t)((uint8_t)buf[1] << 16);
+          (int32_t)((uint8_t)buf[2] << 0)
+        | (int32_t)((uint8_t)buf[1] << 8)
+        | (int32_t)((uint8_t)buf[0] << 16);
     value = AS_BIG_ENDIAN((uint24_t)intValue);
 }
 

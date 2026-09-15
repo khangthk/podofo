@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfInfo.h"
@@ -11,7 +9,7 @@
 #include "PdfDictionary.h"
 #include "PdfString.h"
 
-#define PRODUCER_STRING "PoDoFo - https://github.com/podofo/podofo"
+#define PRODUCER_STRING "PoDoFo - https://podofo.github.io/"
 
 using namespace std;
 using namespace PoDoFo;
@@ -25,6 +23,23 @@ PdfInfo::PdfInfo(PdfObject& obj, PdfInfoInitial initial)
     : PdfInfo(obj)
 {
     init(initial);
+}
+
+bool PdfInfo::TryCreateFromObject(const PdfObject& obj, unique_ptr<const PdfInfo>& info)
+{
+    return TryCreateFromObject(const_cast<PdfObject&>(obj), reinterpret_cast<unique_ptr<PdfInfo>&>(info));
+}
+
+bool PdfInfo::TryCreateFromObject(PdfObject& obj, unique_ptr<PdfInfo>& info)
+{
+    if (obj.GetDataType() == PdfDataType::Dictionary)
+    {
+        info.reset(new PdfInfo(obj));
+        return true;
+    }
+
+    info.reset();
+    return false;
 }
 
 void PdfInfo::init(PdfInfoInitial initial)

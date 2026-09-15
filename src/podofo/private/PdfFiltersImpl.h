@@ -1,22 +1,26 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_FILTERS_PRIVATE_H
 #define PDF_FILTERS_PRIVATE_H
 
-/**
- * \file PdfFiltersPrivate.h
- *
- * Provides implementations of various PDF stream filters.
- *
- * This is an internal header. It should not be included in podofo.h, and
- * should not be included directly by client applications. These filters should
- * only be accessed through the factory interface in PdfFilters.h .
- */
+/// @file PdfFiltersPrivate.h
+///
+/// Provides implementations of various PDF stream filters.
+///
+/// This is an internal header. It should not be included in podofo.h, and
+/// should not be included directly by client applications. These filters should
+/// only be accessed through the factory interface in PdfFilters.h .
 
 #include "PdfFilter.h"
+
+#ifdef ZLIB_WINAPI
+// It appears zlib.h can include <windows.h> when ZLIB_WINAPI is defined,
+// which causes usual issues with unwanted macros like GetObject().
+// We early workaround them here, before including zlib.h
+// See https://github.com/podofo/podofo/issues/314#issuecomment-3864027624
+#include "WindowsLeanMean.h"
+#endif // ZLIB_WINAPI
 
 #include <zlib.h>
 
@@ -25,8 +29,7 @@ namespace PoDoFo {
 class PdfPredictorDecoder;
 class OutputStreamDevice;
 
-/** The ascii hex filter.
- */
+/// The ascii hex filter.
 class PdfHexFilter final : public PdfFilter
 {
 public:
@@ -51,8 +54,7 @@ private:
     bool m_Low;
 };
 
-/** The Ascii85 filter.
- */
+/// The Ascii85 filter.
 class PdfAscii85Filter final : public PdfFilter
 {
 public:
@@ -85,8 +87,7 @@ private:
     unsigned m_tuple;
 };
 
-/** The Flate filter.
- */
+/// The Flate filter.
 class PdfFlateFilter final : public PdfFilter
 {
     static constexpr unsigned BUFFER_SIZE = 4096;
@@ -122,8 +123,7 @@ private:
     std::shared_ptr<PdfPredictorDecoder> m_Predictor;
 };
 
-/** The RLE filter.
- */
+/// The RLE filter.
 class PdfRLEFilter final : public PdfFilter
 {
 public:
@@ -143,10 +143,10 @@ public:
 
 private:
     int m_CodeLen;
+    bool m_AwaitingControlByte;
 };
 
-/** The LZW filter.
- */
+/// The LZW filter.
 class PdfLZWFilter final : public PdfFilter
 {
     struct TLzwItem
@@ -194,8 +194,7 @@ private:
     std::shared_ptr<PdfPredictorDecoder> m_Predictor;
 };
 
-/** The crypt filter.
- */
+/// The crypt filter.
 class PdfCryptFilter final : public PdfFilter
 {
 public:

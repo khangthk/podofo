@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfDictionary.h"
@@ -33,6 +31,7 @@ PdfDictionary& PdfDictionary::operator=(const PdfDictionary& rhs)
     AssertMutable();
     m_Map = rhs.m_Map;
     setChildrenParent();
+    SetDirty();
     return *this;
 }
 
@@ -42,6 +41,7 @@ PdfDictionary& PdfDictionary::operator=(PdfDictionary&& rhs) noexcept
     m_Map = std::move(rhs.m_Map);
     setChildrenParent();
     rhs.SetDirty();
+    SetDirty();
     return *this;
 }
 
@@ -56,8 +56,8 @@ bool PdfDictionary::operator==(const PdfDictionary& rhs) const
 
 bool PdfDictionary::operator!=(const PdfDictionary& rhs) const
 {
-    if (this != &rhs)
-        return true;
+    if (this == &rhs)
+        return false;
 
     // We don't check owner
     return m_Map != rhs.m_Map;
@@ -119,7 +119,7 @@ PdfObject& PdfDictionary::addKey(const PdfName& key, PdfObject&& obj)
     else
     {
         // Manually setting dirty on the assigned object will
-        // implicity make this container dirty, but won't make
+        // implicitly make this container dirty, but won't make
         // dirty the moved "obj"
         inserted.first->second.AssignNoDirtySet(std::move(obj));
         inserted.first->second.SetDirty();
@@ -179,8 +179,9 @@ PdfObject* PdfDictionary::findKey(const string_view& key) const
     if (obj == nullptr)
         return nullptr;
 
-    if (obj->IsReference())
-        return GetIndirectObject(obj->GetReference());
+    PdfReference ref;
+    if (obj->TryGetReference(ref))
+        return GetIndirectObject(ref);
     else
         return obj;
 }

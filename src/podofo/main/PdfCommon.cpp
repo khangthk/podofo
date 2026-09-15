@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "podofo/private/OpenSSLInternal.h"
@@ -27,11 +24,11 @@ constexpr unsigned MaxRecursionDepthDefault = 450;
 
 PODOFO_EXPORT unsigned s_MaxRecursionDepth = MaxRecursionDepthDefault;
 
-#ifdef DEBUG
-PODOFO_EXPORT PdfLogSeverity s_MaxLogSeverity = PdfLogSeverity::Debug;
-#else
+#ifdef NDEBUG
 PODOFO_EXPORT PdfLogSeverity s_MaxLogSeverity = PdfLogSeverity::Information;
-#endif // DEBUG
+#else // !NDEBUG
+PODOFO_EXPORT PdfLogSeverity s_MaxLogSeverity = PdfLogSeverity::Debug;
+#endif // NDEBUG
 
 PODOFO_EXPORT LogMessageCallback s_LogMessageCallback;
 
@@ -39,7 +36,11 @@ PODOFO_EXPORT ssl::OpenSSLMain s_SSL;
 
 static unsigned s_MaxObjectCount = (1U << 23) - 1;
 
+#if OPENSSL_VERSION_MAJOR >= 3
+OSSL_LIB_CTX* ssl::Init()
+#else // OPENSSL_VERSION_MAJOR < 3
 void ssl::Init()
+#endif // OPENSSL_VERSION_MAJOR >= 3
 {
     // Initialize the OpenSSL singleton
     static struct InitOpenSSL
@@ -49,6 +50,18 @@ void ssl::Init()
             s_SSL.Init();
         }
     } s_init;
+#if OPENSSL_VERSION_MAJOR >= 3
+    return s_SSL.GetLibCtx();
+#endif // OPENSSL_VERSION_MAJOR >= 3
+}
+
+bool PdfCommon::IsDebugBuild()
+{
+#ifdef NDEBUG
+    return false;
+#else // !NDEBUG
+    return true;
+#endif // NDEBUG
 }
 
 void PdfCommon::AddFontDirectory(const string_view& path)

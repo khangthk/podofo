@@ -10,8 +10,19 @@ if (MSVC)
     # Force requirement for unicode entry point
     add_link_options(/ENTRY:wmainCRTStartup)
 else()
+    if (MINGW)
+        add_link_options(-municode)
+    endif()
     # TODO: Remove me when all the tools are cleaned of use of C functions
     add_compile_options(-Wno-deprecated-declarations)
+endif()
+
+find_package(Lua)
+if(LUA_FOUND)
+    message("Found lua headers in ${LUA_INCLUDE_DIR}, library at ${LUA_LIBRARIES}")
+	include_directories(${LUA_INCLUDE_DIR})
+    add_compile_definitions(PODOFO_HAVE_LUA)
+	set(PODOFO_HAVE_LUA TRUE)
 endif()
 
 add_subdirectory(podofobox)

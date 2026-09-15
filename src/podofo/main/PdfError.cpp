@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 // PdfError.h doesn't, and can't, include PdfDeclarations.h so we do so here.
 // PdfDeclarationsPrivate.h will include PdfError.h for us.
@@ -122,6 +120,8 @@ string_view PdfError::ErrorName(PdfErrorCode code)
             return "PdfErrorCode::InvalidFontData"sv;
         case PdfErrorCode::InvalidContentStream:
             return "PdfErrorCode::InvalidContentStream"sv;
+        case PdfErrorCode::InvalidInput:
+            return "PdfErrorCode::InvalidInput"sv;
         case PdfErrorCode::UnsupportedFilter:
             return "PdfErrorCode::UnsupportedFilter"sv;
         case PdfErrorCode::UnsupportedFontFormat:
@@ -132,6 +132,8 @@ string_view PdfError::ErrorName(PdfErrorCode code)
             return "PdfErrorCode::FlateError"sv;
         case PdfErrorCode::FreeTypeError:
             return "PdfErrorCode::FreeTypeError"sv;
+        case PdfErrorCode::UnsupportedOperation:
+            return "PdfErrorCode::UnsupportedOperation"sv;
         case PdfErrorCode::UnsupportedPixelFormat:
             return "PdfErrorCode::UnsupportedPixelFormat"sv;
         case PdfErrorCode::UnsupportedImageFormat:
@@ -146,6 +148,8 @@ string_view PdfError::ErrorName(PdfErrorCode code)
             return "PdfErrorCode::ItemAlreadyPresent"sv;
         case PdfErrorCode::OpenSSLError:
             return "PdfErrorCode::OpenSSLError"sv;
+        case PdfErrorCode::SignatureVerificationError:
+            return "PdfErrorCode::SignatureVerificationError"sv;
         case PdfErrorCode::Unknown:
             return "PdfErrorCode::Unknown"sv;
         default:
@@ -211,6 +215,10 @@ string_view PdfError::ErrorMessage(PdfErrorCode code)
             return "The font data is invalid."sv;
         case PdfErrorCode::InvalidContentStream:
             return "The content stream is invalid due to mismatched context pairing or other problems."sv;
+        case PdfErrorCode::InvalidInput:
+            return "The supplied input value is incorrect/unsupported."sv;
+        case PdfErrorCode::UnsupportedOperation:
+            return "The requested operation is not supported"sv;
         case PdfErrorCode::UnsupportedFilter:
             break;
         case PdfErrorCode::UnsupportedFontFormat:
@@ -237,6 +245,8 @@ string_view PdfError::ErrorMessage(PdfErrorCode code)
             return "Error while reading or writing XMP metadata"sv;
         case PdfErrorCode::OpenSSLError:
             return "OpenSSL error"sv;
+        case PdfErrorCode::SignatureVerificationError:
+            return "A signature verification failed"sv;
         case PdfErrorCode::Unknown:
             return "Error code unknown."sv;
         default:

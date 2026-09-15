@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef AUX_STREAM_DEVICE_H
 #define AUX_STREAM_DEVICE_H
@@ -20,37 +18,38 @@
 
 namespace PoDoFo {
 
-/** This class provides an output device which operates
- *  either on a file or on a buffer in memory.
- *  Additionally it can count the bytes written to the device.
- *
- *  This class is suitable for inheritance to provide output
- *  devices of your own. Just override the required virtual methods.
- */
+/// This class provides an output device which operates
+/// either on a file or on a buffer in memory.
+/// Additionally it can count the bytes written to the device.
+///
+/// This class is suitable for inheritance to provide output
+/// devices of your own. Just override the required virtual methods.
 class PODOFO_API StreamDevice : public InputStreamDevice, public OutputStreamDevice
 {
 protected:
     StreamDevice(DeviceAccess access);
 
 protected:
+    /// NOTE: It just forwards to InputStreamDevice, disambiguating
+    /// the InputStreamDevice/OutputStreamDevice inheritance
+    void resetBuffers() override;
+
     static size_t SeekPosition(size_t curpos, size_t devlen, ssize_t offset, SeekDirection direction);
 };
 
 class PODOFO_API StandardStreamDevice : public StreamDevice
 {
 public:
-    /** Construct a new StreamDevice that writes all data to a std::ostream.
-     *
-     *  \param stream write to this std::ostream
-     */
+    /// Construct a new StreamDevice that writes all data to a std::ostream.
+    ///
+    /// @param stream write to this std::ostream
     StandardStreamDevice(std::ostream& stream);
 
     StandardStreamDevice(std::istream& stream);
 
-    /** Construct a new StreamDevice that writes all data to a std::iostream
-     *  and reads from it as well.
-     *  \param stream read/write from/to this std::iostream
-     */
+    /// Construct a new StreamDevice that writes all data to a std::iostream
+    /// and reads from it as well.
+    /// @param stream read/write from/to this std::iostream
     StandardStreamDevice(std::iostream& stream);
 
     ~StandardStreamDevice();
@@ -72,6 +71,7 @@ protected:
     bool readChar(char& ch) override;
     bool peek(char& ch) const override;
     void seek(ssize_t offset, SeekDirection direction) override;
+    void truncate() override;
 
     inline std::ios& GetStream() { return *m_Stream; }
 
@@ -87,7 +87,7 @@ private:
 
 // These are the .NET System.IO file opening modes
 // https://docs.microsoft.com/en-us/dotnet/api/system.io.filemode?view=net-6.0
-enum class FileMode
+enum class FileMode : uint8_t
 {
     CreateNew = 1,     ///< Create a new file (throw if existing) for writing/reading
     Create,            ///< Create a new file or truncate existing one for writing/reading
@@ -100,16 +100,13 @@ enum class FileMode
 class PODOFO_API FileStreamDevice : public StreamDevice
 {
 public:
-    /** Open for reading the supplied filepath
-     */
+    /// Open for reading the supplied filepath
     FileStreamDevice(const std::string_view & filepath);
 
-    /** Open for reading/writing the supplied filepath with the given filemode
-     */
+    /// Open for reading/writing the supplied filepath with the given filemode
     FileStreamDevice(const std::string_view & filepath, FileMode mode);
 
-    /** Open for the supplied filepath with the given filemode and access
-     */
+    /// Open for the supplied filepath with the given filemode and access
     FileStreamDevice(const std::string_view& filepath, FileMode mode,
         DeviceAccess access);
 
@@ -134,10 +131,47 @@ protected:
     bool peek(char& ch) const override;
     void seek(ssize_t offset, SeekDirection direction) override;
     void close() override;
+    void truncate() override;
+    void resetBuffers() override;
 
 private:
-    FILE* m_file;
+    /// The buffer serves one direction at a time, mirroring stdio
+    enum class BufferDirection : uint8_t
+    {
+        None = 0,
+        Read,
+        Write
+    };
+
+private:
+    /// Fill the read window, flushing pending writes first
+    void refill();
+    /// Write out the pending bytes and re-anchor the buffer to the file offset
+    void flushWrite();
+    /// Enter the Write direction, dropping any read window
+    void beginWrite();
+    /// Commit the logical position to m_Position and drop the buffered state.
+    /// @remarks The OS file offset may still be ahead of it after a read
+    void dropBuffers();
+    /// Bring the OS file offset back to the logical position
+    void syncFdOffset();
+    /// Re-arm the read window over the retained buffer content when the
+    /// given position lands inside it, sparing a seek and a fill
+    bool tryRetainBuffer(size_t pos);
+    void ensureOpen() const;
+    void assertInvariants() const;
+
+private:
     std::string m_Filepath;
+    std::unique_ptr<char[]> m_Buffer;
+    size_t m_BufferOffset;      ///< File offset of m_Buffer[0]
+    size_t m_Filled;            ///< Read content bytes in m_Buffer, retained across a seek
+    size_t m_Pending;           ///< Write direction: dirty bytes in m_Buffer
+    size_t m_Position;          ///< Logical position, authoritative when direction is None
+    size_t m_FdOffset;          ///< Tracked OS file offset, kept exact
+    BufferDirection m_Direction;
+    bool m_Eof;
+    int m_fd;
 };
 
 template <typename TContainer>
@@ -150,15 +184,11 @@ public:
         m_container(&container),
         m_Position(ate ? container.size() : 0) { }
 
-    /**
-     * \remarks by default it set the current position at the begin of the container
-     */
+    /// @remarks by default it set the current position at the begin of the container
     ContainerStreamDevice(const TContainer& container) :
         ContainerStreamDevice(const_cast<TContainer&>(container), DeviceAccess::Read, false) { }
 
-    /**
-     * \remarks by default it set the current position at the end of the container 
-     */
+    /// @remarks by default it set the current position at the end of the container
     ContainerStreamDevice(TContainer& container) :
         ContainerStreamDevice(container, DeviceAccess::ReadWrite, true) { }
 
@@ -220,6 +250,11 @@ protected:
         m_Position = SeekPosition(m_Position, m_container->size(), offset, direction);
     }
 
+    void truncate() override
+    {
+        m_container->resize(m_Position);
+    }
+
 private:
     TContainer* m_container;
     size_t m_Position;
@@ -228,9 +263,8 @@ private:
 class PODOFO_API SpanStreamDevice : public StreamDevice
 {
 public:
-    /** Construct a new StreamDevice that reads all data from a memory buffer.
-     *  The buffer is temporarily binded
-     */
+    /// Construct a new StreamDevice that reads all data from a memory buffer.
+    /// The buffer is temporarily bound
     SpanStreamDevice(const char* buffer, size_t size);
     SpanStreamDevice(const bufferview& buffer);
     SpanStreamDevice(const std::string_view& view);
@@ -258,9 +292,19 @@ protected:
     bool readChar(char& ch) override;
     bool peek(char& ch) const override;
     void seek(ssize_t offset, SeekDirection direction) override;
+    void truncate() override;
+    void resetBuffers() override;
 
 private:
     SpanStreamDevice(std::nullptr_t) = delete;
+
+private:
+    /// Read the logical position, which lives in the read window while armed
+    size_t getPos() const;
+    /// Set the logical position, keeping m_Position valid as the fallback
+    void setPos(size_t pos);
+    /// Enable the read window over the whole remainder of the span, if reading is granted
+    void tryEnableReadWindow();
 
 private:
     char* m_buffer;
@@ -268,9 +312,7 @@ private:
     size_t m_Position;
 };
 
-/**
- * An StreamDevice device that does nothing
- */
+/// An StreamDevice device that does nothing
 class PODOFO_API NullStreamDevice final : public StreamDevice
 {
 public:
@@ -289,6 +331,7 @@ protected:
     bool readChar(char& ch) override;
     bool peek(char& ch) const override;
     void seek(ssize_t offset, SeekDirection direction) override;
+    void truncate() override;
 
 private:
     size_t m_Length;

@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2005 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2005 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_PAGE_H
 #define PDF_PAGE_H
@@ -33,10 +31,19 @@ struct PODOFO_API PdfTextEntry final
     nullable<Rect> BoundingBox;
 };
 
+/// A structure with status progress attributes of certain operations
+struct PODOFO_API AbortCheckInfo final
+{
+    unsigned ReadCount = 0;
+};
+
 struct PODOFO_API PdfTextExtractParams final
 {
     nullable<Rect> ClipRect;
     PdfTextExtractFlags Flags = PdfTextExtractFlags::None;
+
+    ///< A callback to early interrupt text extraction
+    std::function<bool(const AbortCheckInfo& info)> AbortCheck = nullptr;
 };
 
 template <typename TField>
@@ -119,10 +126,9 @@ private:
 using PdfPageFieldIterable = PdfPageFieldIterableBase<PdfField>;
 using PdfPageConstFieldIterable = PdfPageFieldIterableBase<const PdfField>;
 
-/** PdfPage is one page in the pdf document.
- *  It is possible to draw on a page using a PdfPainter object.
- *  Every document needs at least one page.
- */
+/// PdfPage is one page in the pdf document.
+/// It is possible to draw on a page using a PdfPainter object.
+/// Every document needs at least one page.
 class PODOFO_API PdfPage final : public PdfDictionaryElement, public PdfCanvas
 {
     PODOFO_PRIVATE_FRIEND(class PdfPageTest);
@@ -130,151 +136,150 @@ class PODOFO_API PdfPage final : public PdfDictionaryElement, public PdfCanvas
     friend class PdfDocument;
 
 private:
-    /** Create a new PdfPage object.
-     *  \param size a Rect specifying the size of the page (i.e the /MediaBox key) in PDF units
-     *  \param parent add the page to this parent
-     */
+    /// Create a new PdfPage object.
+    /// @param size a Rect specifying the size of the page (i.e the /MediaBox key) in PDF units
+    /// @param parent add the page to this parent
     PdfPage(PdfDocument& parent, const Rect& size);
 
-    /** Create a PdfPage based on an existing PdfObject
-     *  \param obj an existing PdfObject
-     *  \param listOfParents a list of PdfObjects that are
-     *                       parents of this page and can be
-     *                       queried for inherited attributes.
-     *                       The last object in the list is the
-     *                       most direct parent of this page.
-     */
+    /// Create a PdfPage based on an existing PdfObject
+    /// @param obj an existing PdfObject
+    /// @param parents a list of PdfObjects that are
+    ///                       parents of this page and can be
+    ///                       queried for inherited attributes.
+    ///                       The last object in the list is the
+    ///                       most direct parent of this page.
     PdfPage(PdfObject& obj);
     PdfPage(PdfObject& obj, std::vector<PdfObject*>&& parents);
 
 public:
+    /// Extract text from the page
+    /// @param entries output vector of text entries
+    /// @param params extraction parameters
     void ExtractTextTo(std::vector<PdfTextEntry>& entries,
         const PdfTextExtractParams& params) const;
 
+    /// Extract text from the page
+    /// @param entries output vector of text entries
+    /// @param pattern a regex pattern to match
+    /// @param params extraction parameters
     void ExtractTextTo(std::vector<PdfTextEntry>& entries,
         const std::string_view& pattern = { },
         const PdfTextExtractParams& params = { }) const;
 
-    Rect GetRect() const;
+    /// Get the rectangle of this page.
+    /// @returns a rectangle. It's oriented according to the canonical PDF coordinate system
+    Rect GetRect() const { return m_Rect; }
 
-    Rect GetRectRaw() const override;
-
+    /// Set the rectangle of this annotation.
+    /// @param rect rectangle to set. It's oriented according to the canonical PDF coordinate system
     void SetRect(const Rect& rect);
 
-    void SetRectRaw(const Rect& rect);
+    Corners GetRectRaw() const override;
 
-    bool HasRotation(double& teta) const override;
+    void SetRectRaw(const Corners& rect);
 
-    /** Set the /MediaBox in PDF Units
-     * \param rect a Rect in PDF units
-     */
-    void SetMediaBox(const Rect& rect, bool raw = false);
+    bool TryGetRotationRadians(double& teta) const override;
 
-    /** Set the /CropBox in PDF Units
-     * \param rect a Rect in PDF units
-     */
-    void SetCropBox(const Rect& rect, bool raw = false);
+    /// Get the current page rotation in radians
+    /// @returns a counterclockwise rotation in radians
+    double GetRotationRadians() const;
 
-    /** Set the /TrimBox in PDF Units
-     * \param rect a Rect in PDF units
-     */
-    void SetTrimBox(const Rect& rect, bool raw = false);
+    /// Set the /MediaBox in PDF Units
+    /// @param rect a Rect in PDF units
+    void SetMediaBox(const Rect& rect);
 
-    /** Set the /BleedBox in PDF Units
-     * \param rect a Rect in PDF units
-     */
-    void SetBleedBox(const Rect& rect, bool raw = false);
+    /// Set the /CropBox in PDF Units
+    /// @param rect a Rect in PDF units
+    void SetCropBox(const Rect& rect);
 
-    /** Set the /ArtBox in PDF Units
-     * \param rect a Rect in PDF units
-     */
-    void SetArtBox(const Rect& rect, bool raw = false);
+    /// Set the /TrimBox in PDF Units
+    /// @param rect a Rect in PDF units
+    void SetTrimBox(const Rect& rect);
 
-    /** Page number inside of the document. The  first page
-     *  has the number 1
-     *
-     *  \returns the number of the page inside of the document
-     */
+    /// Set the /BleedBox in PDF Units
+    /// @param rect a Rect in PDF units
+    void SetBleedBox(const Rect& rect);
+
+    /// Set the /ArtBox in PDF Units
+    /// @param rect a Rect in PDF units
+    void SetArtBox(const Rect& rect);
+
+    /// Page number inside of the document. The  first page
+    /// has the number 1
+    ///
+    /// @returns the number of the page inside of the document
     unsigned GetPageNumber() const;
 
-    /** Creates a Rect with the page size as values which is needed to create a PdfPage object
-     *  from an enum which are defined for a few standard page sizes.
-     *
-     *  \param pageSize the page size you want
-     *  \param landscape create a landscape pagesize instead of portrait (by exchanging width and height)
-     *  \returns a Rect object which can be passed to the PdfPage constructor
-     */
+    /// Creates a Rect with the page size as values which is needed to create a PdfPage object
+    /// from an enum which are defined for a few standard page sizes.
+    ///
+    /// @param pageSize the page size you want
+    /// @param landscape create a landscape pagesize instead of portrait (by exchanging width and height)
+    /// @returns a Rect object which can be passed to the PdfPage constructor
     static Rect CreateStandardPageSize(const PdfPageSize pageSize, bool landscape = false);
 
-    /** Get the current MediaBox (physical page size) in PDF units.
-     *  \returns Rect the page box
-     */
-    Rect GetMediaBox(bool raw = false) const;
+    /// Get the current MediaBox (physical page size) in PDF units.
+    /// @returns Rect the page box
+    Rect GetMediaBox() const;
+    Corners GetMediaBoxRaw() const;
 
-    /** Get the current CropBox (visible page size) in PDF units.
-     *  \returns Rect the page box
-     */
-    Rect GetCropBox(bool raw = false) const;
+    /// Get the current CropBox (visible page size) in PDF units.
+    /// @returns Rect the page box
+    Rect GetCropBox() const;
+    Corners GetCropBoxRaw() const;
 
-    /** Get the current TrimBox (cut area) in PDF units.
-     *  \returns Rect the page box
-     */
-    Rect GetTrimBox(bool raw = false) const;
+    /// Get the current TrimBox (cut area) in PDF units.
+    /// @returns Rect the page box
+    Rect GetTrimBox() const;
+    Corners GetTrimBoxRaw() const;
 
-    /** Get the current BleedBox (extra area for printing purposes) in PDF units.
-     *  \returns Rect the page box
-     */
-    Rect GetBleedBox(bool raw = false) const;
+    /// Get the current BleedBox (extra area for printing purposes) in PDF units.
+    /// @returns Rect the page box
+    Rect GetBleedBox() const;
+    Corners GetBleedBoxRaw() const;
 
-    /** Get the current ArtBox in PDF units.
-     *  \returns Rect the page box
-     */
-    Rect GetArtBox(bool raw = false) const;
+    /// Get the current ArtBox in PDF units.
+    /// @returns Rect the page box
+    Rect GetArtBox() const;
+    Corners GetArtBoxRaw() const;
 
-    /** Get the normalized page rotation (0, 90, 180 or 270)
-     * \remarks It's a clockwise rotation
-     */
-    unsigned GetRotation() const;
+    /// Get the normalized page rotation (0, 90, 180 or 270)
+    /// @returns a clockwise rotation in degrees
+    unsigned GetRotation() const { return m_Rotation; }
 
-    /** Get the raw page rotation (if any)
-     * \remarks It's a clockwise rotation. It may return an invalid real number number
-     */
-    double GetRotationRaw() const;
+    /// Get the raw page rotation (if any)
+    /// @param rotation a clockwise rotation in degrees
+    /// @remarks it may return an invalid page rotation
+    bool TryGetRotationRaw(double& rotation) const;
 
-    /** Set the current page rotation.
-     * \param rotation The rotation to set to the page. Must be a multiple of 90
-     * \remarks The actual stored rotation will be normalzed to 0, 90, 180 or 270
-     */
+    /// Set the current page rotation.
+    /// @param rotation The rotation to set to the page. Must be a multiple of 90
+    /// @remarks The actual stored rotation will be normalized to 0, 90, 180 or 270
     void SetRotation(int rotation);
 
-    /** Move the page at the given index
-     */
-    bool MoveAt(unsigned index);
+    /// Move the page to the given index
+     ///  @param index the new index of the page
+    bool MoveTo(unsigned index);
 
     template <typename TField>
-    TField& CreateField(const std::string_view& name, const Rect& rect, bool rawRect = false);
+    TField& CreateField(const std::string_view& name, const Rect& rect);
 
-    PdfField& CreateField(const std::string_view& name, PdfFieldType fieldType, const Rect& rect, bool rawRect = false);
+    PdfField& CreateField(const std::string_view& name, PdfFieldType fieldType, const Rect& rect);
 
-    /**
-     * Get an iterator for all fields in the page. All widget annotation fields
-     * in the pages will be returned
-     */
+    /// Get an iterator for all fields in the page. All widget annotation fields
+    /// in the pages will be returned
     PdfPageFieldIterable GetFieldsIterator();
     PdfPageConstFieldIterable GetFieldsIterator() const;
 
 public:
     unsigned GetIndex() const { return m_Index; }
     PdfContents& GetOrCreateContents();
-    PdfResources& GetOrCreateResources() override;
     inline const PdfContents* GetContents() const { return m_Contents.get(); }
     inline PdfContents* GetContents() { return m_Contents.get(); }
     const PdfContents& MustGetContents() const;
     PdfContents& MustGetContents();
-    inline const PdfResources* GetResources() const { return m_Resources.get(); }
-    inline PdfResources* GetResources() { return m_Resources.get(); }
-    const PdfResources& MustGetResources() const;
-    PdfResources& MustGetResources();
+    const PdfResources& GetResources() const;
+    PdfResources& GetResources();
     inline PdfAnnotationCollection& GetAnnotations() { return m_Annotations; }
     inline const PdfAnnotationCollection& GetAnnotations() const { return m_Annotations; }
 
@@ -283,15 +288,13 @@ private:
     void FlattenStructure();
     void SetIndex(unsigned index) { m_Index = index; }
 
-    void EnsureResourcesCreated() override;
-
     void CopyContentsTo(OutputStream& stream) const override;
 
     PdfObjectStream& GetOrCreateContentsStream(PdfStreamAppendFlags flags) override;
 
     PdfObjectStream& ResetContentsStream() override;
 
-    PdfField& createField(const std::string_view& name, const std::type_info& typeInfo, const Rect& rect, bool rawRect);
+    PdfResources& GetOrCreateResources() override;
 
     PdfResources* getResources() override;
 
@@ -303,28 +306,31 @@ private:
 
     PdfObject* findInheritableAttribute(const std::string_view& name, bool& isShallow) const;
 
-    /**
-     * Initialize a new page object.
-     * m_Contents must be initialized before calling this!
-     *
-     * \param size page size
-     */
-    void initNewPage(const Rect& size);
-
     void ensureContentsCreated();
-    void ensureResourcesCreated();
 
-    /** Get the bounds of a specified page box in PDF units.
-     * This function is internal, since there are wrappers for all standard boxes
-     *  \returns Rect the page box
-     */
-    Rect getPageBox(const std::string_view& inBox, bool isInheritable, bool raw) const;
+    /// Get the bounds of a specified page box in PDF units.
+    /// This function is internal, since there are wrappers for all standard boxes
+    /// @param inBox the name of the box
+    /// @param isInheritable whether the box is inheritable
+    /// @returns Rect the page box
+    Rect getPageBox(const std::string_view& inBox, bool isInheritable) const;
 
-    void setPageBox(const PdfName& inBox, const Rect& rect, bool raw);
+    /// Get the bounds of a specified page box in PDF units.
+    /// This function is internal, since there are wrappers for all standard boxes
+    /// @param inBox the name of the box
+    /// @param isInheritable whether the box is inheritable
+    /// @returns Corners the page box
+    Corners getPageBoxRaw(const std::string_view& inBox, bool isInheritable) const;
 
-    void loadRotation();
+    /// Set the bounds of a specified page box in PDF units.
+    /// @param inBox the name of the box
+    /// @param rect the rectangle to set
+    void setPageBox(const PdfName& inBox, const Rect& rect);
+
+    void adjustRectToCurrentRotation(Rect& rect) const;
 
 private:
+    // Remove some PdfCanvas methods to maintain the class API surface clean
     PdfElement& GetElement() = delete;
     const PdfElement& GetElement() const = delete;
     PdfObject* GetContentsObject() = delete;
@@ -332,17 +338,18 @@ private:
 
 private:
     unsigned m_Index;
+    unsigned m_Rotation;
+    Rect m_Rect;
     std::vector<PdfObject*> m_parents;
     std::unique_ptr<PdfContents> m_Contents;
     std::unique_ptr<PdfResources> m_Resources;
     PdfAnnotationCollection m_Annotations;
-    int m_Rotation;
 };
 
 template<typename TField>
-TField& PdfPage::CreateField(const std::string_view& name, const Rect & rect, bool rawRect)
+TField& PdfPage::CreateField(const std::string_view& name, const Rect & rect)
 {
-    return static_cast<TField&>(createField(name, typeid(TField), rect, rawRect));
+    return static_cast<TField&>(CreateField(name, PdfField::GetFieldType<TField>(), rect));
 }
 
 template<typename TField>

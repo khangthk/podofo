@@ -125,11 +125,14 @@ int main()
 using namespace std;
 using namespace PoDoFo;
 
+// NOTE: The mappings in this file were generated using the
+// "staging/BuildPredefinedCMaps.cpp" script
+
 static void buildMappings(const string_view& serialized, CodeUnitMap& mappings, CodeUnitRanges& ranges);
 
 namespace
 {
-    using MapGetter = std::add_pointer<PdfCMapEncodingConstPtr()>::type;
+    using MapGetter = std::add_pointer<const PdfCMapEncodingConstPtr&()>::type;
 }
 )");
 
@@ -160,6 +163,15 @@ PdfCMapEncodingConstPtr PdfEncodingMapFactory::GetPredefinedCMap(const string_vi
         return nullptr;
     else
         return found->second();
+}
+
+const PdfCMapEncoding& PdfEncodingMapFactory::GetPredefinedCMapInstance(const string_view& cmapName)
+{
+    auto found = s_PredefinedCMaps.find(cmapName);
+    if (found == s_PredefinedCMaps.end())
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidEncoding, "Could not find a cmap with a CMap name {}", cmapName);
+
+    return *found->second();
 }
 
 unsigned readCode(InputStream& stream, unsigned char codeSize)
@@ -193,23 +205,23 @@ unsigned readCode(InputStream& stream, unsigned char codeSize)
     }
 }
 
-void readMapping(InputStream& stream, CodeUnitMap& mappings)
+void readMapping(InputStream& stream, CodeUnitMap& mappings, vector<codepoint>& temp)
 {
     unsigned char codeSize = (unsigned char)stream.ReadChar();
     unsigned code = readCode(stream, codeSize);
     unsigned char copdePointsSize = (unsigned char)stream.ReadChar();
-    vector<codepoint> codepoints;
+    temp.resize(copdePointsSize);
     uint32_t cp;
     for (unsigned char i = 0; i < copdePointsSize; i++)
     {
         utls::ReadUInt32BE(stream, cp);
-        codepoints.push_back(cp);
+        temp[i] = cp;
     }
 
-    mappings[PdfCharCode(code, codeSize)] = std::move(codepoints);
+    mappings[PdfCharCode(code, codeSize)] = CodePointSpan(temp);
 }
 
-void readRange(InputStream& stream, CodeUnitRanges& ranges)
+void readRange(InputStream& stream, CodeUnitRanges& ranges, vector<codepoint>& temp)
 {
     unsigned char codeSize = (unsigned char)stream.ReadChar();
     unsigned code = readCode(stream, codeSize);
@@ -218,15 +230,15 @@ void readRange(InputStream& stream, CodeUnitRanges& ranges)
     utls::ReadUInt16BE(stream, rangeSize);
 
     unsigned char copdePointsSize = (unsigned char)stream.ReadChar();
-    vector<codepoint> codepoints;
+    temp.resize(copdePointsSize);
     uint32_t cp;
     for (unsigned char i = 0; i < copdePointsSize; i++)
     {
         utls::ReadUInt32BE(stream, cp);
-        codepoints.push_back(cp);
+        temp[i] = cp;
     }
 
-    ranges.insert(CodeUnitRange{ PdfCharCode(code, codeSize), rangeSize, std::move(codepoints) });
+    ranges.insert(CodeUnitRange{ PdfCharCode(code, codeSize), rangeSize, CodePointSpan(temp) });
 }
 
 void buildMappings(const string_view& compressed, CodeUnitMap& mappings, CodeUnitRanges& ranges)
@@ -239,12 +251,13 @@ void buildMappings(const string_view& compressed, CodeUnitMap& mappings, CodeUni
     uint16_t size;
     utls::ReadUInt16BE(stream, size);
     mappings.reserve(size);
+    vector<codepoint> temp;
     for (unsigned i = 0; i < size; i++)
-        readMapping(stream, mappings);
+        readMapping(stream, mappings, temp);
 
     utls::ReadUInt16BE(stream, size);
     for (unsigned i = 0; i < size; i++)
-        readRange(stream, ranges);
+        readRange(stream, ranges, temp);
 }
 )");
 
@@ -347,7 +360,7 @@ void write(const PdfCharCodeMap& map)
 
 void write(const PdfCMapEncoding& encoding, Context& context)
 {
-    s_Stream->Write("        static PdfCMapEncodingConstPtr ");
+    s_Stream->Write("        static const PdfCMapEncodingConstPtr& ");
     auto& info = encoding.GetCIDSystemInfo();
     auto& map = encoding.GetCharMap();
     auto& limits = encoding.GetLimits();

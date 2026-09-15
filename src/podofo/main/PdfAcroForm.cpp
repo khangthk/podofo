@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 
@@ -58,11 +56,6 @@ void PdfAcroForm::init(PdfAcroFormDefaulAppearance defaultAppearance)
 PdfField& PdfAcroForm::CreateField(const string_view& name, PdfFieldType fieldType)
 {
     return AddField(PdfField::Create(name, *this, fieldType));
-}
-
-PdfField& PdfAcroForm::createField(const string_view& name, const type_info& typeInfo)
-{
-    return AddField(PdfField::Create(name, *this, typeInfo));
 }
 
 PdfField& PdfAcroForm::GetFieldAt(unsigned index)
@@ -197,7 +190,21 @@ void PdfAcroForm::SetNeedAppearances(bool needAppearances)
 
 bool PdfAcroForm::GetNeedAppearances() const
 {
-    return this->GetDictionary().FindKeyAs<bool>("NeedAppearances", false);
+    return this->GetDictionary().FindKeyAsSafe<bool>("NeedAppearances", false);
+}
+
+PdfAcroFormSigFlags PdfAcroForm::GetSigFlags() const
+{
+    int64_t num;
+    if (!GetDictionary().TryFindKeyAs("SigFlags", num))
+        return PdfAcroFormSigFlags::None;
+
+    return (PdfAcroFormSigFlags)num;
+}
+
+void PdfAcroForm::SetSigFlags(PdfAcroFormSigFlags flags)
+{
+    GetDictionary().AddKey("SigFlags"_n, (int64_t)flags);
 }
 
 PdfArray* PdfAcroForm::getFieldArray() const

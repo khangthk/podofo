@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfName.h"
@@ -19,13 +17,13 @@ using namespace PoDoFo;
 template<typename T>
 void hexchr(const unsigned char ch, T& it);
 
-static void escapeNameTo(string& dst, const bufferview& view);
-static charbuff unescapeName(const string_view& view);
+static void escapeNameTo(string& dst, bufferview view);
+static charbuff unescapeName(string_view view);
 
 const PdfName PdfName::Null = PdfName();
 
 PdfName::PdfName()
-    : m_Utf8View(), m_dataAllocated(false) { }
+    : PdfDataMember(PdfDataType::Name), m_dataAllocated(false), m_Utf8View() { }
 
 PdfName::~PdfName()
 {
@@ -34,11 +32,13 @@ PdfName::~PdfName()
 }
 
 PdfName::PdfName(const string& str)
+    : PdfDataMember(PdfDataType::Name)
 {
     initFromUtf8String(str);
 }
 
 PdfName::PdfName(const string_view& view)
+    : PdfDataMember(PdfDataType::Name)
 {
     if (view.data() == nullptr)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidName, "Name is null");
@@ -47,18 +47,18 @@ PdfName::PdfName(const string_view& view)
 }
 
 PdfName::PdfName(charbuff&& buff)
-    : m_data(new NameData{ std::move(buff), nullptr, false }), m_dataAllocated(true)
+    : PdfDataMember(PdfDataType::Name), m_dataAllocated(true), m_data(new NameData{ std::move(buff), nullptr, false })
 {
 }
 
-// NOTE: This constructor is reserved for read-only
-// string literals: we just set the data view
-PdfName::PdfName(const char* str, size_t length)
-    : m_Utf8View(str, length), m_dataAllocated(false)
+// We expect the input to be a const string literal: we just set the data view
+PdfName::PdfName(const char& str, size_t length)
+    : PdfDataMember(PdfDataType::Name), m_dataAllocated(false), m_Utf8View(&str, length)
 {
 }
 
 PdfName::PdfName(const PdfName& rhs)
+    : PdfDataMember(PdfDataType::Name)
 {
     if (rhs.m_dataAllocated)
     {
@@ -72,6 +72,11 @@ PdfName::PdfName(const PdfName& rhs)
     }
 }
 
+PdfName::PdfName(PdfName&& rhs) noexcept
+    : PdfDataMember(PdfDataType::Name)
+{
+    moveFrom(std::move(rhs));
+}
 
 PdfName& PdfName::operator=(const PdfName& rhs)
 {
@@ -86,6 +91,13 @@ PdfName& PdfName::operator=(const PdfName& rhs)
         new(&m_data)string_view(rhs.m_Utf8View);
         m_dataAllocated = false;
     }
+    return *this;
+}
+
+PdfName& PdfName::operator=(PdfName&& rhs) noexcept
+{
+    this->~PdfName();
+    moveFrom(std::move(rhs));
     return *this;
 }
 
@@ -117,6 +129,19 @@ void PdfName::initFromUtf8String(const string_view& view)
         new(&m_data)shared_ptr<NameData>(new NameData{ (charbuff)PoDoFo::ConvertUTF8ToPdfDocEncoding(view), std::make_unique<string>(view), true });
 
     m_dataAllocated = true;
+}
+
+void PdfName::moveFrom(PdfName&& rhs)
+{
+    if (rhs.m_dataAllocated)
+        new(&m_data)shared_ptr<NameData>(std::move(rhs.m_data));
+    else
+        new(&m_Utf8View)string_view(rhs.m_Utf8View);
+
+    m_dataAllocated = rhs.m_dataAllocated;
+
+    new(&rhs.m_Utf8View)string_view("");
+    rhs.m_dataAllocated = false;
 }
 
 PdfName PdfName::FromEscaped(const string_view& view)
@@ -184,15 +209,14 @@ void PdfName::expandUtf8String()
     m_data->IsUtf8Expanded = true;
 }
 
-/** Escape the input string according to the PDF name
- *  escaping rules and return the result.
- *
- *  \param it Iterator referring to the start of the input string
- *            ( eg a `const char *' or a `std::string::iterator' )
- *  \param length Length of input string
- *  \returns Escaped string
- */
-void escapeNameTo(string& dst, const bufferview& view)
+/// Escape the input string according to the PDF name
+/// escaping rules and return the result.
+///
+/// @param it Iterator referring to the start of the input string
+///            ( eg a `const char *' or a `std::string::iterator' )
+/// @param length Length of input string
+/// @returns Escaped string
+void escapeNameTo(string& dst, bufferview view)
 {
     // Scan the input string once to find out how much memory we need
     // to reserve for the encoded result string. We could do this in one
@@ -210,8 +234,8 @@ void escapeNameTo(string& dst, const bufferview& view)
         else
         {
             // Leave room for either just the char, or a #xx escape of it.
-            outchars += (PdfTokenizer::IsRegular(ch) &&
-                PdfTokenizer::IsPrintable(ch) && (ch != '#')) ? 1 : 3;
+            outchars += (PoDoFo::IsCharRegular(ch) &&
+                PoDoFo::IsCharASCIIPrintable(ch) && (ch != '#')) ? 1 : 3;
         }
     }
     // Reserve it. We can't use reserve() because the GNU STL doesn't seem to
@@ -222,8 +246,8 @@ void escapeNameTo(string& dst, const bufferview& view)
     for (size_t i = 0; i < view.size(); i++)
     {
         char ch = view[i];
-        if (PdfTokenizer::IsRegular(ch)
-            && PdfTokenizer::IsPrintable(ch)
+        if (PoDoFo::IsCharRegular(ch)
+            && PoDoFo::IsCharASCIIPrintable(ch)
             && ch != '#')
         {
             *(bufIt++) = ch;
@@ -236,15 +260,14 @@ void escapeNameTo(string& dst, const bufferview& view)
     }
 }
 
-/** Interpret the passed string as an escaped PDF name
- *  and return the unescaped form.
- *
- *  \param it Iterator referring to the start of the input string
- *            ( eg a `const char *' or a `std::string::iterator' )
- *  \param length Length of input string
- *  \returns Unescaped string
- */
-charbuff unescapeName(const string_view& view)
+/// Interpret the passed string as an escaped PDF name
+/// and return the unescaped form.
+///
+/// @param it Iterator referring to the start of the input string
+///            ( eg a `const char *' or a `std::string::iterator' )
+/// @param length Length of input string
+/// @returns Unescaped string
+charbuff unescapeName(string_view view)
 {
     // We know the decoded string can be AT MOST
     // the same length as the encoded one, so:
@@ -352,19 +375,17 @@ PdfName::operator string_view() const
         return m_Utf8View;
 }
 
-/**
- * This function writes a hex encoded representation of the character
- * `ch' to `buf', advancing the iterator by two steps.
- *
- * \warning no buffer length checking is performed, so MAKE SURE
- *          you have enough room for the two characters that
- *          will be written to the buffer.
- *
- * \param ch The character to write a hex representation of
- * \param buf An iterator (eg a char* or std::string::iterator) to write the
- *            characters to.  Must support the postfix ++, operator=(char) and
- *            dereference operators.
- */
+/// This function writes a hex encoded representation of the character
+/// `ch' to `buf', advancing the iterator by two steps.
+///
+/// @warning no buffer length checking is performed, so MAKE SURE
+///          you have enough room for the two characters that
+///          will be written to the buffer.
+///
+/// @param ch The character to write a hex representation of
+/// @param buf An iterator (eg a char* or std::string::iterator) to write the
+///            characters to.  Must support the postfix ++, operator=(char) and
+///            dereference operators.
 template<typename T>
 void hexchr(const unsigned char ch, T& it)
 {

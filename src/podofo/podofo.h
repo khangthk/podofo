@@ -1,17 +1,13 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2021 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2021 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PODOFO_H
 #define PODOFO_H
 
-/**
- * This file can be used in client applications to include
- * all files required by podofo at once.
- */
+/// @file podofo.h
+/// This file can be used in client applications to include
+/// all files required by podofo at once.
 
  // Auxiliary headers
 #include "auxiliary/StreamDeviceBase.h"
@@ -30,15 +26,15 @@
 #include "main/PdfError.h"
 #include "main/PdfCommon.h"
 #include "main/PdfMath.h"
-#include "main/PdfOperatorUtils.h"
 #include "main/PdfArray.h"
 #include "main/PdfCanvas.h"
-#include "main/PdfColorSpaceFilter.h"
+#include "main/PdfColorSpace.h"
+#include "main/PdfPattern.h"
+#include "main/PdfFunction.h"
 #include "main/PdfColor.h"
 #include "main/PdfContentStreamReader.h"
 #include "main/PdfPostScriptTokenizer.h"
 #include "main/PdfData.h"
-#include "main/PdfDataProvider.h"
 #include "main/PdfDate.h"
 #include "main/PdfDictionary.h"
 #include "main/PdfEncoding.h"
@@ -78,9 +74,7 @@
 #include "main/PdfTextBox.h"
 #include "main/PdfButton.h"
 #include "main/PdfCheckBox.h"
-#include "main/PdfButton.h"
 #include "main/PdfPushButton.h"
-#include "main/PdfCheckBox.h"
 #include "main/PdfRadioButton.h"
 #include "main/PdfChoiceField.h"
 #include "main/PdfComboBox.h"

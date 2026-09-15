@@ -1,21 +1,19 @@
-/**
- * SPDX-FileCopyrightText: (C) 2011 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2011 Petr Pytelka
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2011 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2011 Petr Pytelka
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfSignature.h"
 
 #include <numerics/checked_math.h>
 #include <podofo/private/PdfParser.h>
+#include <podofo/private/CmsVerifyContext.h>
 
 #include "PdfDocument.h"
 #include "PdfDictionary.h"
 #include "PdfData.h"
 
-#include "PdfDocument.h"
 #include "PdfXObject.h"
 #include "PdfPage.h"
 
@@ -23,15 +21,20 @@ using namespace std;
 using namespace PoDoFo;
 using namespace chromium::base;
 
-PdfSignature::PdfSignature(PdfAcroForm& acroform, const shared_ptr<PdfField>& parent) :
-    PdfField(acroform, PdfFieldType::Signature, parent),
+constexpr size_t BufferSize = 65536;
+
+static void appendRange(InputStreamDevice& input, CmsVerifyContext& context,
+    size_t offset, size_t length, charbuff& buffer);
+
+PdfSignature::PdfSignature(PdfAcroForm& acroform, shared_ptr<PdfField>&& parent) :
+    PdfField(acroform, PdfFieldType::Signature, std::move(parent)),
     m_ValueObj(nullptr)
 {
     init(acroform);
 }
 
-PdfSignature::PdfSignature(PdfAnnotationWidget& widget, const shared_ptr<PdfField>& parent) :
-    PdfField(widget, PdfFieldType::Signature, parent),
+PdfSignature::PdfSignature(PdfAnnotationWidget& widget, shared_ptr<PdfField>&& parent) :
+    PdfField(widget, PdfFieldType::Signature, std::move(parent)),
     m_ValueObj(nullptr)
 {
     init(widget.GetDocument().GetOrCreateAcroForm());
@@ -44,18 +47,88 @@ PdfSignature::PdfSignature(PdfObject& obj, PdfAcroForm* acroform) :
     // NOTE: Do not call init() here
 }
 
-void PdfSignature::SetAppearanceStream(PdfXObjectForm& obj, PdfAppearanceType appearance, const PdfName& state)
+bool PdfSignature::TryVerifySignature(InputStreamDevice& input, PdfSignatureVerifyStatus& status) const
 {
-    GetWidget()->SetAppearanceStream(obj, appearance, state);
-    (void)this->GetWidget()->GetOrCreateAppearanceCharacteristics();
+    status = PdfSignatureVerifyStatus::Indeterminate;
+    if (m_ValueObj == nullptr)
+        return false;
+
+    auto& dict = m_ValueObj->GetDictionary();
+    const PdfString* contents;
+    const PdfArray* byteRange;
+    if (!dict.TryFindKeyAs("Contents", contents) || !dict.TryFindKeyAs("ByteRange", byteRange))
+        return false;
+
+    // A PDF signature always has a single pair of ranges, the second
+    // one starting right after the /Contents string
+    if (byteRange->GetSize() != 4)
+        return false;
+
+    int64_t offsets[4];
+    for (unsigned i = 0; i < 4; i++)
+    {
+        if (!byteRange->TryGetAtAs(i, offsets[i]) || offsets[i] < 0)
+            return false;
+    }
+
+    size_t firstEnd;
+    size_t secondEnd;
+    if (offsets[0] != 0
+        || !(CheckedNumeric((size_t)offsets[0]) + CheckedNumeric((size_t)offsets[1])).AssignIfValid(&firstEnd)
+        || !(CheckedNumeric((size_t)offsets[2]) + CheckedNumeric((size_t)offsets[3])).AssignIfValid(&secondEnd))
+    {
+        return false;
+    }
+
+    // The ranges must not overlap and must be within the input
+    auto inputLength = input.GetLength();
+    if (firstEnd > (size_t)offsets[2] || secondEnd > inputLength)
+        return false;
+
+    CmsVerifyContext context;
+    if (!context.TryReset(contents->GetRawData()))
+        return false;
+
+    // Accordingly to current interpretation of the specification,
+    // a PDF signature has exactly one signer
+    if (context.GetSignerCount() != 1 || !context.TryLoadSigner(0))
+        return false;
+
+    charbuff buffer(BufferSize);
+    appendRange(input, context, 0, (size_t)offsets[1], buffer);
+    appendRange(input, context, (size_t)offsets[2], (size_t)offsets[3], buffer);
+
+    if (!context.VerifySignature())
+    {
+        status = PdfSignatureVerifyStatus::Invalid;
+        return false;
+    }
+
+    // NOTE: The attribute is not mandatory here, but it must match when present.
+    // Requiring it is a conformance concern of the caller, as it depends on /SubFilter
+    bool attrMissing;
+    if (!context.TryVerifySigningCertificateV2(attrMissing))
+    {
+        status = PdfSignatureVerifyStatus::Invalid;
+        return false;
+    }
+
+    status = secondEnd == inputLength
+        ? PdfSignatureVerifyStatus::CryptoVerified
+        : PdfSignatureVerifyStatus::CryptoVerifiedPartialCoverage;
+    return true;
 }
 
 void PdfSignature::init(PdfAcroForm& acroForm)
 {
-    // TABLE 8.68 Signature flags: SignaturesExist (1) | AppendOnly (2)
+    // TABLE 8.68 Signature flags: SignaturesExist (1)
     // This will open signature panel when inspecting PDF with acrobat,
     // even if the signature is unsigned
-    acroForm.GetDictionary().AddKey("SigFlags"_n, (int64_t)3);
+    // NOTE: Don't touch the form if the flag is already set,
+    // and preserve the other flags, such as AppendOnly
+    auto sigFlags = acroForm.GetSigFlags();
+    if ((sigFlags & PdfAcroFormSigFlags::SignaturesExist) == PdfAcroFormSigFlags::None)
+        acroForm.SetSigFlags(sigFlags | PdfAcroFormSigFlags::SignaturesExist);
 }
 
 void PdfSignature::SetSignerName(nullable<const PdfString&> text)
@@ -94,7 +167,20 @@ void PdfSignature::PrepareForSigning(const string_view& filter,
     const string_view& subFilter, const string_view& type,
     const PdfSignatureBeacons& beacons)
 {
-    EnsureValueObject();
+    if (m_ValueObj == nullptr)
+    {
+        ensureValueObject();
+    }
+    else
+    {
+        // NOTE: If we are repeating the signature, we must create a newer object
+        if (m_ValueObj->GetDictionary().HasKey("Contents"))
+        {
+            m_ValueObj = &this->GetDocument().GetObjects().CreateObject(*m_ValueObj);
+            GetDictionary().AddKey("V"_n, m_ValueObj->GetIndirectReference());
+        }
+    }
+
     auto& dict = m_ValueObj->GetDictionary();
     // This must be ensured before any signing operation
     dict.AddKey("Filter"_n, PdfName(filter));
@@ -121,19 +207,32 @@ void PdfSignature::SetSignatureLocation(nullable<const PdfString&> text)
 
 void PdfSignature::SetSignatureCreator(nullable<const PdfString&> creator)
 {
+    if (creator == nullptr)
+        SetCreatingApplication(nullptr);
+    else
+        SetCreatingApplication(PdfName(creator->GetString()));
+}
+
+void PdfSignature::SetCreatingApplication(nullable<const PdfName&> application)
+{
     EnsureValueObject();
-    // TODO: Make it less brutal, preserving /Prop_Build
-    if (creator.has_value())
+    PdfDictionary* dict;
+    if (application.has_value())
     {
-        m_ValueObj->GetDictionary().AddKey("Prop_Build"_n, PdfDictionary());
-        PdfObject* propBuild = m_ValueObj->GetDictionary().GetKey("Prop_Build");
-        propBuild->GetDictionary().AddKey("App"_n, PdfDictionary());
-        PdfObject* app = propBuild->GetDictionary().GetKey("App");
-        app->GetDictionary().AddKey("Name"_n, *creator);
+        if (!m_ValueObj->GetDictionary().TryFindKeyAs("Prop_Build", dict))
+            dict = &m_ValueObj->GetDictionary().AddKey("Prop_Build"_n, PdfDictionary()).GetDictionary();
+
+        PdfDictionary* appDict;
+        if (!dict->TryFindKeyAs("Prop_Build", appDict))
+            appDict = &dict->AddKey("App"_n, PdfDictionary()).GetDictionary();
+
+        appDict->AddKey("Name"_n, *application);
     }
     else
     {
-        m_ValueObj->GetDictionary().RemoveKey("Prop_Build");
+        dict = m_ValueObj->GetDictionary().FindKeyAs<PdfDictionary*>("Prop_Build");
+        if (dict != nullptr)
+            dict->RemoveKey("App");
     }
 }
 
@@ -227,8 +326,8 @@ bool PdfSignature::TryGetPreviousRevision(InputStreamDevice& input, OutputStream
 
     int64_t lastRangeOffset;
     int64_t lastRangeLength;
-    if (!byteRange->TryGetAtAs(byteRange->GetSize() - 1, lastRangeOffset)
-        || !byteRange->TryGetAtAs(byteRange->GetSize() - 2, lastRangeLength)
+    if (!byteRange->TryGetAtAs(byteRange->GetSize() - 2, lastRangeOffset)
+        || !byteRange->TryGetAtAs(byteRange->GetSize() - 1, lastRangeLength)
         || lastRangeOffset < 0 || lastRangeLength < 0)
     {
         return false;
@@ -252,6 +351,47 @@ PdfObject* PdfSignature::getValueObject() const
     return m_ValueObj;
 }
 
+nullable<array<size_t, 4>> PdfSignature::GetByteRangeBounds() const
+{
+    const PdfArray* byteRange;
+    if (m_ValueObj == nullptr || !m_ValueObj->GetDictionary().TryFindKeyAs("ByteRange", byteRange))
+        return nullptr;
+
+    // A PDF signature always has a single pair of ranges, the second
+    // one starting right after the /Contents string
+    unsigned size = byteRange->GetSize();
+    if (size != 4)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidObject, "Invalid /ByteRange with {} entries, 4 are expected", size);
+
+    array<size_t, 4> bounds{ };
+    for (unsigned i = 0; i < 2; i++)
+    {
+        int64_t offset;
+        int64_t length;
+        if (!byteRange->TryGetAtAs(i * 2, offset) || !byteRange->TryGetAtAs(i * 2 + 1, length)
+            || offset < 0 || length < 0)
+        {
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidObject, "Invalid /ByteRange range at index {}", i);
+        }
+
+        if (i == 0)
+        {
+            if (offset != 0)
+                PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidObject, "The first /ByteRange range must start at offset zero");
+        }
+        else if ((size_t)offset < bounds[1])
+        {
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidObject, "The second /ByteRange range overlaps the first one");
+        }
+
+        bounds[i * 2] = (size_t)offset;
+        if (!(CheckedNumeric((size_t)offset) + CheckedNumeric((size_t)length)).AssignIfValid(&bounds[i * 2 + 1]))
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidObject, "The /ByteRange range at index {} overflows", i);
+    }
+
+    return bounds;
+}
+
 void PdfSignature::SetContentsByteRangeNoDirtySet(const bufferview& contents, PdfArray&& byteRange)
 {
     m_ValueObj->GetDictionary().AddKeyNoDirtySet("ByteRange"_n, PdfVariant(std::move(byteRange)));
@@ -263,10 +403,12 @@ void PdfSignature::EnsureValueObject()
     if (m_ValueObj != nullptr)
         return;
 
-    m_ValueObj = &this->GetDocument().GetObjects().CreateDictionaryObject("Sig"_n);
-    if (m_ValueObj == nullptr)
-        PODOFO_RAISE_ERROR(PdfErrorCode::ObjectNotFound);
+    ensureValueObject();
+}
 
+void PdfSignature::ensureValueObject()
+{
+    m_ValueObj = &this->GetDocument().GetObjects().CreateDictionaryObject("Sig"_n);
     GetDictionary().AddKey("V"_n, m_ValueObj->GetIndirectReference());
 }
 
@@ -284,4 +426,17 @@ PdfSignatureBeacons::PdfSignatureBeacons()
 {
     ContentsOffset = std::make_shared<size_t>();
     ByteRangeOffset = std::make_shared<size_t>();
+}
+
+void appendRange(InputStreamDevice& input, CmsVerifyContext& context,
+    size_t offset, size_t length, charbuff& buffer)
+{
+    input.Seek(offset);
+    while (length != 0)
+    {
+        size_t readSize = std::min(length, buffer.size());
+        input.Read(buffer.data(), readSize);
+        context.AppendData({ buffer.data(), readSize });
+        length -= readSize;
+    }
 }

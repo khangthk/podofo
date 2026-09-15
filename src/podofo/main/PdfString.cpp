@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfString.h"
@@ -21,7 +19,7 @@ using namespace PoDoFo;
 
 namespace
 {
-    enum class StringEncoding
+    enum class StringEncoding : uint8_t
     {
         utf8,
         utf16be,
@@ -34,12 +32,12 @@ static StringEncoding getEncoding(const string_view& view);
 static PdfStringCharset getCharSet(const string_view& view);
 
 PdfString::PdfString()
-    : m_Utf8View(""), m_dataAllocated(false), m_isHex(false)
+    : PdfDataMember(PdfDataType::String), m_dataAllocated(false), m_isHex(false), m_Utf8View("")
 {
 }
 
 PdfString::PdfString(charbuff&& buff, bool isHex)
-    : m_data(new StringData(std::move(buff), false)), m_dataAllocated(true), m_isHex(isHex)
+    : PdfDataMember(PdfDataType::String), m_dataAllocated(true), m_isHex(isHex), m_data(new StringData(std::move(buff), false))
 {
 }
 
@@ -51,7 +49,7 @@ PdfString::~PdfString()
 }
 
 PdfString::PdfString(const string& str)
-    : m_isHex(false)
+    : PdfDataMember(PdfDataType::String), m_isHex(false)
 {
     // Avoid copying an empty string
     if (str.empty())
@@ -67,7 +65,7 @@ PdfString::PdfString(const string& str)
 }
 
 PdfString::PdfString(const string_view& view)
-    : m_isHex(false)
+    : PdfDataMember(PdfDataType::String), m_isHex(false)
 {
     if (view.data() == nullptr)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "String is null");
@@ -86,12 +84,12 @@ PdfString::PdfString(const string_view& view)
 }
 
 PdfString::PdfString(string&& str)
-    : m_data(new StringData(charbuff(std::move(str)), true)), m_dataAllocated(true), m_isHex(false)
+    : PdfDataMember(PdfDataType::String), m_dataAllocated(true), m_isHex(false), m_data(new StringData(charbuff(std::move(str)), true))
 {
 }
 
 PdfString::PdfString(const PdfString& rhs)
-    : m_isHex(rhs.m_isHex)
+    : PdfDataMember(PdfDataType::String), m_isHex(rhs.m_isHex)
 {
     if (rhs.m_dataAllocated)
     {
@@ -103,6 +101,12 @@ PdfString::PdfString(const PdfString& rhs)
         new(&m_Utf8View)string_view(rhs.m_Utf8View);
         m_dataAllocated = false;
     }
+}
+
+PdfString::PdfString(PdfString&& rhs) noexcept
+    : PdfDataMember(PdfDataType::String)
+{
+    moveFrom(std::move(rhs));
 }
 
 PdfString& PdfString::operator=(const PdfString& rhs)
@@ -123,6 +127,13 @@ PdfString& PdfString::operator=(const PdfString& rhs)
     return *this;
 }
 
+PdfString& PdfString::operator=(PdfString&& rhs) noexcept
+{
+    this->~PdfString();
+    moveFrom(std::move(rhs));
+    return *this;
+}
+
 PdfString PdfString::FromRaw(const bufferview& view, bool isHex)
 {
     return PdfString((charbuff)view, isHex);
@@ -140,7 +151,7 @@ PdfString PdfString::FromHexData(const string_view& hexView, const PdfStatefulEn
     for (size_t i = 0; i < len; i++)
     {
         char ch = hexView[i];
-        if (PdfTokenizer::IsWhitespace(ch))
+        if (PoDoFo::IsCharWhitespace(ch))
             continue;
 
         (void)utls::TryGetHexValue(ch, val);
@@ -495,6 +506,21 @@ void PdfString::ensureCharsEvaluated() const
     }
 
     m_data->StringEvaluated = true;
+}
+
+void PdfString::moveFrom(PdfString&& rhs)
+{
+    if (rhs.m_dataAllocated)
+        new(&m_data)shared_ptr<StringData>(std::move(rhs.m_data));
+    else
+        new(&m_Utf8View)string_view(rhs.m_Utf8View);
+
+    m_dataAllocated = rhs.m_dataAllocated;
+    m_isHex = rhs.m_isHex;
+
+    new(&rhs.m_Utf8View)string_view("");
+    rhs.m_dataAllocated = false;
+    rhs.m_isHex = false;
 }
 
 string_view PdfString::GetRawData() const

@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2021 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2021 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfSigner.h"
@@ -17,13 +14,19 @@ PdfSigner::PdfSigner() { }
 
 PdfSigner::~PdfSigner() { }
 
+void PdfSigner::ValidateSignatureDate(const nullable<PdfDate>& date)
+{
+    // Do nothing by default
+    (void)date;
+}
+
 void PdfSigner::FetchIntermediateResult(charbuff& result)
 {
     (void)result;
     PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
 }
 
-void PdfSigner::ComputeSignatureSequential(const bufferview& processedResult, charbuff& buffer, bool dryrun)
+void PdfSigner::ComputeSignatureDeferred(const bufferview& processedResult, charbuff& buffer, bool dryrun)
 {
     (void)processedResult;
     (void)buffer;

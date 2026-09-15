@@ -1,19 +1,17 @@
-/**
- * SPDX-FileCopyrightText: (C) 2005 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2005 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfImage.h"
 
+#include <csetjmp>
+
 #ifdef __MINGW32__
-// Workaround <csetjmp> inlcuding <Windows.h> in MINGW
+// Workaround <csetjmp> including <Windows.h> in MINGW
 // See https://github.com/podofo/podofo/commit/939ec73578e09aab11012bd38a034a74da1a202c#commitcomment-141054513
 #include <podofo/private/WindowsLeanMean.h>
 #endif // __MINGW32__
-
-#include <csetjmp>
 
 #ifdef PODOFO_HAVE_TIFF_LIB
 #ifdef USE_WIN32_FILEIO
@@ -32,6 +30,7 @@ extern "C" {
 
 #include <podofo/private/FileSystem.h>
 #include <podofo/private/ImageUtils.h>
+#include <podofo/private/PdfDrawingOperations.h>
 
 #include <pdfium/core/fxcodec/fax/faxmodule.h>
 
@@ -50,16 +49,15 @@ using namespace PoDoFo;
 
 #ifdef PODOFO_HAVE_PNG_LIB
 #include <png.h>
-static void pngReadData(png_structp pngPtr, png_bytep data, png_size_t length);
-static void loadFromPngContent(PdfImage& image, png_structp png, png_infop info);
 static void createPngContext(png_structp& png, png_infop& pnginfo);
 #endif // PODOFO_HAVE_PNG_LIB
 
 static void fetchPDFScanLineRGB(unsigned char* dstScanLine,
     unsigned width, const unsigned char* srcScanLine, PdfPixelFormat srcPixelFormat);
+static void invalidateImageInfo(PdfImageInfo& info);
 
 PdfImage::PdfImage(PdfDocument& doc)
-    : PdfXObject(doc, PdfXObjectType::Image), m_ColorSpace(PdfColorSpaceFilterFactory::GetUnkownInstance()), m_Width(0), m_Height(0), m_BitsPerComponent(0)
+    : PdfXObject(doc, PdfXObjectType::Image), m_ColorSpace(PdfColorSpaceFilterFactory::GetUnkownInstancePtr()), m_Width(0), m_Height(0), m_BitsPerComponent(0)
 {
 }
 
@@ -172,14 +170,14 @@ void PdfImage::DecodeTo(OutputStream& stream, PdfPixelFormat format, int scanLin
                 auto decodeParms = istream.GetMediaDecodeParms()[0];
                 if (decodeParms != nullptr)
                 {
-                    k = (int)decodeParms->FindKeyAs<int64_t>("K");
-                    endOfLine = decodeParms->FindKeyAs<bool>("EndOfLine");
-                    encodedByteAlign = decodeParms->FindKeyAs<bool>("EncodedByteAlign");
-                    blackIs1 = decodeParms->FindKeyAs<bool>("BlackIs1");
-                    columns = (int)decodeParms->FindKeyAs<int64_t>("Columns", 1728);
-                    rows = (int)decodeParms->FindKeyAs<int64_t>("Rows");
+                    k = (int)decodeParms->FindKeyAsSafe<int64_t>("K");
+                    endOfLine = decodeParms->FindKeyAsSafe<bool>("EndOfLine");
+                    encodedByteAlign = decodeParms->FindKeyAsSafe<bool>("EncodedByteAlign");
+                    blackIs1 = decodeParms->FindKeyAsSafe<bool>("BlackIs1");
+                    columns = (int)decodeParms->FindKeyAsSafe<int64_t>("Columns", 1728);
+                    rows = (int)decodeParms->FindKeyAsSafe<int64_t>("Rows");
                 }
-                auto decoder = fxcodec::FaxModule::CreateDecoder(
+                auto decoder = chromium::FaxModule::CreateDecoder(
                     pdfium::span<const uint8_t>((const uint8_t *)imageData.data(), imageData.size()),
                     (int)m_Width, (int)m_Height, k, endOfLine, encodedByteAlign, blackIs1, columns, rows);
 
@@ -201,16 +199,129 @@ charbuff PdfImage::GetDecodedCopy(PdfPixelFormat format)
     return buffer;
 }
 
+bool PdfImage::TryFetchRawImageInfo(PdfImageInfo& info)
+{
+    invalidateImageInfo(info);
+    auto stream = GetObject().GetStream();
+    if (stream == nullptr)
+        return false;
+
+    auto input = stream->GetInputStream();
+    info.Filters = input.GetMediaFilters();
+
+    if (info.Filters->size() == 0)
+    {
+    Unwrapped:
+        // All the info is available in the PDF object
+        info.Width = m_Width;
+        info.Height = m_Height;
+        info.BitsPerComponent = m_BitsPerComponent;
+        info.ColorSpace = PdfColorSpaceInitializer(shared_ptr(m_ColorSpace));
+        return true;
+    }
+    else
+    {
+        switch ((*info.Filters)[0])
+        {
+            case PdfFilterType::DCTDecode:
+            {
+                charbuff imageData;
+                ContainerStreamDevice device(imageData);
+                input.CopyTo(device);
+
+#ifdef PODOFO_HAVE_JPEG_LIB
+                jpeg_decompress_struct ctx;
+
+                JpegErrorHandler jerr;
+                try
+                {
+                    InitJpegDecompressContext(ctx, jerr);
+
+                    PoDoFo::jpeg_memory_src(&ctx, reinterpret_cast<JOCTET*>(imageData.data()), imageData.size());
+
+                    if (jpeg_read_header(&ctx, TRUE) <= 0)
+                        return false;
+
+                    info.Width = ctx.image_width;
+                    info.Height = ctx.image_height;
+                    info.BitsPerComponent = 8; // CHECK-ME
+                    switch (ctx.out_color_space)
+                    {
+                        case JCS_CMYK:
+                            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceCMYKInstancePtr();
+                            break;
+#if !defined(LIBJPEG_TURBO_VERSION)
+                        // CHECK-ME: I think It should imply /DeviceRGB as during
+                        // the decode the destination pixel format is enforced
+                        case JCS_BG_RGB: // Only defined in older libjpeg
+#endif
+                        case JCS_RGB:
+                            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr();
+                            break;
+                        case JCS_GRAYSCALE:
+                            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
+                            break;
+                        default:
+                            // Do nothing, it's null by default
+                            break;
+                    }
+                }
+                catch (...)
+                {
+                    jpeg_destroy_decompress(&ctx);
+                    throw;
+                }
+
+                jpeg_destroy_decompress(&ctx);
+#else
+                PODOFO_RAISE_ERROR_INFO(PdfErrorCode::NotImplemented, "Missing jpeg support");
+#endif
+                return true;
+            }
+            case PdfFilterType::CCITTFaxDecode:
+            {
+                // Tiff like images are unwrapped, so all the info is
+                // available in the PDF object
+                goto Unwrapped;
+            }
+            case PdfFilterType::JBIG2Decode:
+            case PdfFilterType::JPXDecode:
+            default:
+                return false;
+        }
+    }
+}
+
+PdfXObjectForm* PdfImage::getForm() const
+{
+    return m_Transformation.get();
+}
+
 PdfImage::PdfImage(PdfObject& obj)
     : PdfXObject(obj, PdfXObjectType::Image)
 {
-    m_Width = static_cast<unsigned>(this->GetDictionary().FindKeyAsSafe<int64_t>("Width"));
-    m_Height = static_cast<unsigned>(this->GetDictionary().FindKeyAsSafe<int64_t>("Height"));
-    m_BitsPerComponent = static_cast<unsigned>(this->GetDictionary().FindKeyAsSafe<int64_t>("BitsPerComponent"));
+    auto& dict = this->GetDictionary();
+    m_Width = static_cast<unsigned short>(dict.FindKeyAsSafe<int64_t>("Width"));
+    m_Height = static_cast<unsigned short>(dict.FindKeyAsSafe<int64_t>("Height"));
+    m_BitsPerComponent = static_cast<unsigned char>(dict.FindKeyAsSafe<int64_t>("BitsPerComponent"));
 
-    auto csObj = GetDictionary().FindKey("ColorSpace");
-    if (csObj == nullptr || !PdfColorSpaceFilterFactory::TryCreateFromObject(*csObj, m_ColorSpace))
-        m_ColorSpace = PdfColorSpaceFilterFactory::GetUnkownInstance();
+    auto csObj = dict.FindKey("ColorSpace");
+    if (csObj == nullptr)
+    {
+        bool isImageMask;
+        if (dict.TryFindKeyAs("ImageMask"_n, isImageMask) && isImageMask)
+        {
+            // ISO 32000-2:2020 8.9.6.2 Stencil masking: "An image mask (an
+            // image XObject whose ImageMask entry is true) is a monochrome
+            // image in which each sample is specified by a single bit"
+            m_ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
+        }
+    }
+    else
+    {
+        if (!PdfColorSpaceFilterFactory::TryCreateFromObject(*csObj, m_ColorSpace))
+            m_ColorSpace = PdfColorSpaceFilterFactory::GetUnkownInstancePtr();
+    }
 }
 
 void PdfImage::SetSoftMask(const PdfImage& softmask)
@@ -300,6 +411,11 @@ void PdfImage::SetDataRaw(const bufferview& buffer, const PdfImageInfo& info)
 
 void PdfImage::SetDataRaw(InputStream& stream, const PdfImageInfo& info)
 {
+    setDataRaw(stream, info, PdfImageLoadFlags::None);
+}
+
+void PdfImage::setDataRaw(InputStream& stream, const PdfImageInfo& info, PdfImageLoadFlags flags)
+{
     if (info.ColorSpace.IsNull())
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "Missing color space");
 
@@ -307,6 +423,8 @@ void PdfImage::SetDataRaw(InputStream& stream, const PdfImageInfo& info)
     m_Width = info.Width;
     m_Height = info.Height;
     m_BitsPerComponent = info.BitsPerComponent;
+    if ((flags & PdfImageLoadFlags::SkipTransform) == PdfImageLoadFlags::None)
+        m_Transformation = getTransformation(info.Orientation);
 
     auto& dict = GetDictionary();
     dict.AddKey("Width"_n, static_cast<int64_t>(info.Width));
@@ -333,84 +451,95 @@ void PdfImage::SetDataRaw(InputStream& stream, const PdfImageInfo& info)
         GetObject().GetOrCreateStream().SetData(stream);
 }
 
-void PdfImage::Load(const string_view& filepath, unsigned imageIndex)
+PdfImageInfo PdfImage::Load(const string_view& filepath, const PdfImageLoadParams& params)
 {
-    if (filepath.length() > 3)
-    {
-        auto extension = fs::u8path(filepath).extension().u8string();
-        extension = utls::ToLower(extension);
+    // TODO: This should not look at the extension
+    auto extension = fs::u8path(filepath).extension().u8string();
+    extension = utls::ToLower(extension);
+
+    PdfImageInfo info;
+    charbuff buffer;
+    unique_ptr<InputStream> stream;
+    if (extension.length() == 0)
+        goto Fail;
 
 #ifdef PODOFO_HAVE_TIFF_LIB
-        if (extension == ".tif" || extension == ".tiff")
-        {
-            loadFromTiff(filepath, imageIndex);
-            return;
-        }
+    if (extension == ".tif" || extension == ".tiff")
+    {
+        loadFromTiff(filepath, params, buffer, info);
+        stream.reset(new SpanStreamDevice(buffer));
+        goto Success;
+    }
 #endif
 
 #ifdef PODOFO_HAVE_JPEG_LIB
-        if (extension == ".jpg" || extension == ".jpeg")
-        {
-            loadFromJpeg(filepath);
-            return;
-        }
+    if (extension == ".jpg" || extension == ".jpeg")
+    {
+        loadFromJpeg(filepath, info);
+        stream.reset(new FileStreamDevice(filepath));
+        goto Success;
+    }
 #endif
 
 #ifdef PODOFO_HAVE_PNG_LIB
-        if (extension == ".png")
-        {
-            loadFromPng(filepath);
-            return;
-        }
+    if (extension == ".png")
+    {
+        loadFromPng(filepath, buffer, info);
+        stream.reset(new SpanStreamDevice(buffer));
+        goto Success;
+    }
 #endif
 
-    }
+Fail:
     PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedImageFormat, filepath);
+
+Success:
+    setDataRaw(*stream, info, params.Flags);
+    return info;
 }
 
-void PdfImage::LoadFromBuffer(const bufferview& buffer, unsigned imageIndex)
+PdfImageInfo PdfImage::LoadFromBuffer(const bufferview& buffer, const PdfImageLoadParams& params)
 {
-    if (buffer.size() <= 4)
-        return;
+    if (buffer.size() < 4)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedImageFormat, "Buffer too small for magic number");
 
-    unsigned char magic[4];
-    memcpy(magic, buffer.data(), 4);
+    PdfImageInfo info;
+    charbuff dstbuff;
+    unique_ptr<InputStream> stream;
 
 #ifdef PODOFO_HAVE_TIFF_LIB
-    if ((magic[0] == 0x4D &&
-        magic[1] == 0x4D &&
-        magic[2] == 0x00 &&
-        magic[3] == 0x2A) ||
-        (magic[0] == 0x49 &&
-            magic[1] == 0x49 &&
-            magic[2] == 0x2A &&
-            magic[3] == 0x00))
+    if ((buffer[0] == '\x49' && buffer[1] == '\x49' && buffer[2] == '\x2A' && buffer[3] == '\x00') ||
+        (buffer[0] == '\x4D' && buffer[1] == '\x4D' && buffer[2] == '\x00' && buffer[3] == '\x2A'))
     {
-        loadFromTiffData((const unsigned char*)buffer.data(), buffer.size(), imageIndex);
-        return;
+        loadFromTiffData((const unsigned char*)buffer.data(), buffer.size(), params, dstbuff, info);
+        stream.reset(new SpanStreamDevice(dstbuff));
+        goto Success;
     }
 #endif
 
 #ifdef PODOFO_HAVE_JPEG_LIB
-    if (magic[0] == 0xFF &&
-        magic[1] == 0xD8)
+    if (buffer[0] == '\xFF' && buffer[1] == '\xD8' && buffer[2] == '\xFF')
     {
-        loadFromJpegData((const unsigned char*)buffer.data(), buffer.size());
-        return;
+        loadFromJpegData((const unsigned char*)buffer.data(), buffer.size(), info);
+        stream.reset(new SpanStreamDevice(buffer));
+        goto Success;
     }
 #endif
 
 #ifdef PODOFO_HAVE_PNG_LIB
-    if (magic[0] == 0x89 &&
-        magic[1] == 0x50 &&
-        magic[2] == 0x4E &&
-        magic[3] == 0x47)
+    if (buffer[0] == '\x89' && buffer[1] == '\x50' && buffer[2] == '\x4E' && buffer[3] == '\x47')
     {
-        loadFromPngData((const unsigned char*)buffer.data(), buffer.size());
-        return;
+        loadFromPngData((const unsigned char*)buffer.data(), buffer.size(), dstbuff, info);
+        stream.reset(new SpanStreamDevice(dstbuff));
+        goto Success;
     }
 #endif
+
     PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedImageFormat, "Unknown magic number");
+
+Success:
+    setDataRaw(*stream, info, params.Flags);
+    return info;
 }
 
 void PdfImage::ExportTo(charbuff& buff, PdfExportFormat format, PdfArray args) const
@@ -434,13 +563,13 @@ void PdfImage::ExportTo(charbuff& buff, PdfExportFormat format, PdfArray args) c
 
 #ifdef PODOFO_HAVE_JPEG_LIB
 
-void PdfImage::loadFromJpeg(const string_view& filename)
+void PdfImage::loadFromJpeg(const string_view& filepath, PdfImageInfo& info)
 {
-    FILE* file = utls::fopen(filename, "rb");
+    FILE* file = utls::fopen(filepath, "rb");
     if (file == nullptr)
     {
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::FileNotFound,
-            "{} not found or error opening file", filename);
+            "{} not found or error opening file", filepath);
     }
 
     jpeg_decompress_struct ctx;
@@ -450,11 +579,7 @@ void PdfImage::loadFromJpeg(const string_view& filename)
         InitJpegDecompressContext(ctx, jerr);
         jpeg_stdio_src(&ctx, file);
 
-        PdfImageInfo info;
         loadFromJpegInfo(ctx, info);
-
-        FileStreamDevice input(filename);
-        this->SetDataRaw(input, info);
     }
     catch (...)
     {
@@ -519,7 +644,7 @@ void PdfImage::exportToJpeg(charbuff& destBuff, const PdfArray& args) const
     jpeg_destroy_compress(&ctx);
 }
 
-void PdfImage::loadFromJpegData(const unsigned char* data, size_t len)
+void PdfImage::loadFromJpegData(const unsigned char* data, size_t len, PdfImageInfo& info)
 {
     jpeg_decompress_struct ctx;
     JpegErrorHandler jerr;
@@ -529,11 +654,7 @@ void PdfImage::loadFromJpegData(const unsigned char* data, size_t len)
         InitJpegDecompressContext(ctx, jerr);
         jpeg_memory_src(&ctx, data, len);
 
-        PdfImageInfo info;
         loadFromJpegInfo(ctx, info);
-
-        SpanStreamDevice input((const char*)data, len);
-        this->SetDataRaw(input, info);
     }
     catch (...)
     {
@@ -566,12 +687,12 @@ void PdfImage::loadFromJpegInfo(jpeg_decompress_struct& ctx, PdfImageInfo& info)
     {
         case 3:
         {
-            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceRGBInstace();
+            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr();
             break;
         }
         case 4:
         {
-            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceCMYKInstace();
+            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceCMYKInstancePtr();
 
             // The jpeg-doc isn't specific on this point, but cmyk's seem to be stored
             // in an inverted fashion. Fix by attaching a decode array
@@ -587,7 +708,7 @@ void PdfImage::loadFromJpegInfo(jpeg_decompress_struct& ctx, PdfImageInfo& info)
         }
         default:
         {
-            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstace();
+            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
             break;
         }
     }
@@ -602,7 +723,7 @@ static void TIFFErrorWarningHandler(const char*, const char*, va_list)
     // Do nothing
 }
 
-void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
+void PdfImage::loadFromTiffHandle(void* handle, const PdfImageLoadParams& params, charbuff& buffer, PdfImageInfo& info)
 {
     TIFF* hInTiffHandle = (TIFF*)handle;
 
@@ -614,7 +735,7 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
     int32_t resolutionUnit;
 
     // Set the page/image index in the tiff context
-    TIFFSetDirectory(hInTiffHandle, (uint16_t)imageIndex);
+    TIFFSetDirectory(hInTiffHandle, (uint16_t)params.ImageIndex);
 
     TIFFGetField(hInTiffHandle, TIFFTAG_IMAGEWIDTH, &width);
     TIFFGetField(hInTiffHandle, TIFFTAG_IMAGELENGTH, &height);
@@ -643,10 +764,10 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
     if (planarConfig != PLANARCONFIG_CONTIG && colorChannels != 1)
         PODOFO_RAISE_ERROR(PdfErrorCode::UnsupportedImageFormat);
 
-    PdfImageInfo info;
     info.Width = width;
     info.Height = height;
     info.BitsPerComponent = (unsigned char)bitsPerSample;
+    info.Orientation = (PdfImageOrientation)orientation;
     switch (photoMetric)
     {
         case PHOTOMETRIC_MINISBLACK:
@@ -655,11 +776,11 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
             {
                 info.DecodeArray.push_back(0);
                 info.DecodeArray.push_back(1);
-                info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstace();
+                info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
             }
             else if (bitsPixel == 8 || bitsPixel == 16)
             {
-                info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstace();
+                info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
             }
             else
             {
@@ -669,20 +790,37 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
         }
         case PHOTOMETRIC_MINISWHITE:
         {
-            if (bitsPixel == 1)
+            if (samplesPerPixel == 1)
             {
-                info.DecodeArray.push_back(1);
-                info.DecodeArray.push_back(0);
-                info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstace();
+                if (bitsPixel == 1)
+                {
+                    info.DecodeArray.push_back(1);
+                    info.DecodeArray.push_back(0);
+                    info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
+                }
+                else if (bitsPixel == 8 || bitsPixel == 16)
+                {
+                    info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
+                }
+                else
+                {
+                    PODOFO_RAISE_ERROR(PdfErrorCode::UnsupportedImageFormat);
+                }
             }
-            else if (bitsPixel == 8 || bitsPixel == 16)
+            else if (samplesPerPixel == 3 && bitsPerSample == 8)
             {
-                info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstace();
+                // NOTE: PHOTOMETRIC_MINISWHITE should be used only for B&W images,
+                // but TestRotations.tif uses samplesPerPixel == 3 and bitsPixel == 8
+                // to identify a RGB image. Some viewer/editors adhere to this
+                // convention, eg. Windows Photo Viewer. Some others, like Gimp,
+                // don't
+                info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr();
             }
             else
             {
                 PODOFO_RAISE_ERROR(PdfErrorCode::UnsupportedImageFormat);
             }
+
             break;
         }
         case PHOTOMETRIC_RGB:
@@ -690,7 +828,7 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
             if (bitsPixel != 24)
                 PODOFO_RAISE_ERROR(PdfErrorCode::UnsupportedImageFormat);
 
-            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceRGBInstace();
+            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr();
             break;
         }
         case PHOTOMETRIC_SEPARATED:
@@ -698,7 +836,7 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
             if (bitsPixel != 32)
                 PODOFO_RAISE_ERROR(PdfErrorCode::UnsupportedImageFormat);
 
-            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceCMYKInstace();
+            info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceCMYKInstancePtr();
             break;
         }
         case PHOTOMETRIC_PALETTE:
@@ -727,7 +865,7 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
 
             // Add the colorspace to our image
             info.ColorSpace = PdfColorSpaceInitializer(std::make_shared<PdfColorSpaceFilterIndexed>(
-                PdfColorSpaceFilterFactory::GetDeviceRGBInstace(), numColors, std::move(data)));
+                PdfColorSpaceInitializer(PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr()), numColors, std::move(data)));
             break;
         }
 
@@ -740,7 +878,7 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
 
     size_t scanlineSize = TIFFScanlineSize(hInTiffHandle);
     size_t bufferSize = scanlineSize * height;
-    charbuff buffer(bufferSize);
+    buffer.resize(bufferSize);
     for (row = 0; row < height; row++)
     {
         if (TIFFReadScanline(hInTiffHandle,
@@ -750,12 +888,9 @@ void PdfImage::loadFromTiffHandle(void* handle, unsigned imageIndex)
             PODOFO_RAISE_ERROR(PdfErrorCode::UnsupportedImageFormat);
         }
     }
-
-    SpanStreamDevice input(buffer);
-    SetDataRaw(input, info);
 }
 
-void PdfImage::loadFromTiff(const string_view& filename, unsigned imageIndex)
+void PdfImage::loadFromTiff(const string_view& filename, const PdfImageLoadParams& params, charbuff& buffer, PdfImageInfo& info)
 {
     TIFFSetErrorHandler(TIFFErrorWarningHandler);
     TIFFSetWarningHandler(TIFFErrorWarningHandler);
@@ -765,12 +900,12 @@ void PdfImage::loadFromTiff(const string_view& filename, unsigned imageIndex)
 
 #ifdef _WIN32
     auto filename16 = utf8::utf8to16((string)filename);
-    TIFF* hInfile = TIFFOpenW((wchar_t*)filename16.c_str(), "rb");
+    TIFF* handle = TIFFOpenW((wchar_t*)filename16.c_str(), "rb");
 #else
-    TIFF* hInfile = TIFFOpen(filename.data(), "rb");
+    TIFF* handle = TIFFOpen(filename.data(), "rb");
 #endif
 
-    if (hInfile == nullptr)
+    if (handle == nullptr)
     {
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::FileNotFound,
             "{} not found or error opening file", filename);
@@ -778,157 +913,116 @@ void PdfImage::loadFromTiff(const string_view& filename, unsigned imageIndex)
 
     try
     {
-        loadFromTiffHandle(hInfile, imageIndex);
+        loadFromTiffHandle(handle, params, buffer, info);
     }
     catch (...)
     {
-        TIFFClose(hInfile);
+        TIFFClose(handle);
         throw;
     }
 
-    TIFFClose(hInfile);
+    TIFFClose(handle);
 }
 
-struct TiffData
+struct TiffMemoryBuffer
 {
-    TiffData(const unsigned char* data, tsize_t size) :m_data(data), m_pos(0), m_size(size) {}
-
-    tsize_t read(tdata_t data, tsize_t length)
-    {
-        tsize_t bytesRead = 0;
-        if (length > m_size - static_cast<tsize_t>(m_pos))
-        {
-            memcpy(data, &m_data[m_pos], m_size - (tsize_t)m_pos);
-            bytesRead = m_size - (tsize_t)m_pos;
-            m_pos = m_size;
-        }
-        else
-        {
-            memcpy(data, &m_data[m_pos], length);
-            bytesRead = length;
-            m_pos += length;
-        }
-        return bytesRead;
-    }
-
-    toff_t size()
-    {
-        return m_size;
-    }
-
-    toff_t seek(toff_t pos, int whence)
-    {
-        if (pos == 0xFFFFFFFF) {
-            return 0xFFFFFFFF;
-        }
-        switch (whence)
-        {
-            case SEEK_SET:
-                if (static_cast<tsize_t>(pos) > m_size)
-                {
-                    m_pos = m_size;
-                }
-                else
-                {
-                    m_pos = pos;
-                }
-                break;
-            case SEEK_CUR:
-                if (static_cast<tsize_t>(pos + m_pos) > m_size)
-                {
-                    m_pos = m_size;
-                }
-                else
-                {
-                    m_pos += pos;
-                }
-                break;
-            case SEEK_END:
-                if (static_cast<tsize_t>(pos) > m_size)
-                {
-                    m_pos = 0;
-                }
-                else
-                {
-                    m_pos = m_size - pos;
-                }
-                break;
-        }
-        return m_pos;
-    }
-
-private:
-    const unsigned char* m_data;
-    toff_t m_pos;
-    tsize_t m_size;
+    const unsigned char* Data;
+    size_t Size;
+    toff_t Offset;
 };
-tsize_t tiff_Read(thandle_t st, tdata_t buffer, tsize_t size)
+
+static tsize_t tiffReadProc(thandle_t handle, tdata_t buf, tsize_t size)
 {
-    TiffData* data = (TiffData*)st;
-    return data->read(buffer, size);
-};
-tsize_t tiff_Write(thandle_t st, tdata_t buffer, tsize_t size)
-{
-    (void)st;
-    (void)buffer;
-    (void)size;
-    return 0;
-};
-int tiff_Close(thandle_t)
+    TiffMemoryBuffer* buffer = (TiffMemoryBuffer*)handle;
+    tsize_t readBytes = std::min(size, (tsize_t)(buffer->Size - buffer->Offset));
+    if (readBytes > 0)
+    {
+        memcpy(buf, buffer->Data + buffer->Offset, readBytes);
+        buffer->Offset += readBytes;
+    }
+    return readBytes;
+}
+
+static tsize_t tiffWriteProc(thandle_t, tdata_t, tsize_t)
 {
     return 0;
-};
-toff_t tiff_Seek(thandle_t st, toff_t pos, int whence)
+}
+
+static toff_t tiffSeekProc(thandle_t handle, toff_t off, int whence)
 {
-    TiffData* data = (TiffData*)st;
-    return data->seek(pos, whence);
-};
-toff_t tiff_Size(thandle_t st)
-{
-    TiffData* data = (TiffData*)st;
-    return data->size();
-};
-int tiff_Map(thandle_t, tdata_t*, toff_t*)
+    TiffMemoryBuffer* buffer = (TiffMemoryBuffer*)handle;
+    toff_t nextOffset;
+    switch (whence)
+    {
+        case SEEK_SET:
+            nextOffset = off;
+            break;
+        case SEEK_CUR:
+            nextOffset = buffer->Offset + off;
+            break;
+        case SEEK_END:
+            nextOffset = buffer->Size + off;
+            break;
+        default:
+            return (toff_t)-1;
+    }
+
+    if (nextOffset > buffer->Size)
+        return (toff_t)-1;
+
+    buffer->Offset = nextOffset;
+    return buffer->Offset;
+}
+
+static int tiffCloseProc(thandle_t)
 {
     return 0;
-};
-void tiff_Unmap(thandle_t, tdata_t, toff_t)
+}
+
+static toff_t tiffSizeProc(thandle_t handle)
 {
-    return;
-};
-void PdfImage::loadFromTiffData(const unsigned char* data, size_t len, unsigned imageIndex)
+    TiffMemoryBuffer* buffer = (TiffMemoryBuffer*)handle;
+    return (toff_t)buffer->Size;
+}
+
+static int tiffMapProc(thandle_t, tdata_t*, toff_t*)
+{
+    return 0;
+}
+
+static void tiffUnmapProc(thandle_t, tdata_t, toff_t)
+{
+}
+
+void PdfImage::loadFromTiffData(const unsigned char* data, size_t len, const PdfImageLoadParams& params, charbuff& buffer, PdfImageInfo& info)
 {
     TIFFSetErrorHandler(TIFFErrorWarningHandler);
     TIFFSetWarningHandler(TIFFErrorWarningHandler);
 
-    if (data == nullptr)
-        PODOFO_RAISE_ERROR(PdfErrorCode::InvalidHandle);
+    TiffMemoryBuffer memBuffer{ data, len, 0 };
+    auto handle = TIFFClientOpen("Memory", "r", (thandle_t)&memBuffer,
+        tiffReadProc, tiffWriteProc, tiffSeekProc, tiffCloseProc, tiffSizeProc, tiffMapProc, tiffUnmapProc);
 
-    TiffData tiffData(data, (tsize_t)len);
-    TIFF* hInHandle = TIFFClientOpen("Memory", "r", (thandle_t)&tiffData,
-        tiff_Read, tiff_Write, tiff_Seek, tiff_Close, tiff_Size,
-        tiff_Map, tiff_Unmap);
-    if (hInHandle == nullptr)
-        PODOFO_RAISE_ERROR(PdfErrorCode::InvalidHandle);
+    if (handle == nullptr)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedImageFormat, "Could not open TIFF from memory");
 
     try
     {
-        loadFromTiffHandle(hInHandle, imageIndex);
+        loadFromTiffHandle(handle, params, buffer, info);
     }
     catch (...)
     {
-        TIFFClose(hInHandle);
+        TIFFClose(handle);
         throw;
     }
 
-    TIFFClose(hInHandle);
+    TIFFClose(handle);
 }
-
 #endif // PODOFO_HAVE_TIFF_LIB
 
 #ifdef PODOFO_HAVE_PNG_LIB
 
-void PdfImage::loadFromPng(const string_view& filename)
+void PdfImage::loadFromPng(const string_view& filename, charbuff& buffer, PdfImageInfo& info)
 {
     FILE* file = utls::fopen(filename, "rb");
     if (file == nullptr)
@@ -939,7 +1033,7 @@ void PdfImage::loadFromPng(const string_view& filename)
 
     try
     {
-        loadFromPngHandle(file);
+        loadFromPngHandle(file, buffer, info);
     }
     catch (...)
     {
@@ -950,7 +1044,7 @@ void PdfImage::loadFromPng(const string_view& filename)
     fclose(file);
 }
 
-void PdfImage::loadFromPngHandle(FILE* stream)
+void PdfImage::loadFromPngHandle(FILE* stream, charbuff& buffer, PdfImageInfo& info)
 {
     png_byte header[8];
     if (fread(header, 1, 8, stream) != 8 ||
@@ -965,7 +1059,7 @@ void PdfImage::loadFromPngHandle(FILE* stream)
     {
         createPngContext(png, pnginfo);
         png_init_io(png, stream);
-        loadFromPngContent(*this, png, pnginfo);
+        loadFromPngContent(png, pnginfo, buffer, info);
     }
     catch (...)
     {
@@ -976,49 +1070,39 @@ void PdfImage::loadFromPngHandle(FILE* stream)
     png_destroy_read_struct(&png, &pnginfo, (png_infopp)nullptr);
 }
 
-struct PngData
+struct PngMemoryBuffer
 {
-    PngData(const unsigned char* data, png_size_t size) :
-        m_data(data), m_pos(0), m_size(size) {}
-
-    void read(png_bytep data, png_size_t length)
-    {
-        if (length > m_size - m_pos)
-        {
-            memcpy(data, &m_data[m_pos], m_size - m_pos);
-            m_pos = m_size;
-        }
-        else
-        {
-            memcpy(data, &m_data[m_pos], length);
-            m_pos += length;
-        }
-    }
-
-private:
-    const unsigned char* m_data;
-    png_size_t m_pos;
-    png_size_t m_size;
+    const unsigned char* Data;
+    size_t Size;
+    size_t Offset;
 };
 
-void PdfImage::loadFromPngData(const unsigned char* data, size_t len)
+static void pngReadFromMemory(png_structp png, png_bytep data, png_size_t length)
 {
-    if (data == nullptr)
-        PODOFO_RAISE_ERROR(PdfErrorCode::InvalidHandle);
+    auto buffer = (PngMemoryBuffer*)png_get_io_ptr(png);
+    if (length > buffer->Size - buffer->Offset) // overflow-safe check
+    {
+        // NOTE: png_error call sets a longjmp, so no need to return after it
+        png_error(png, "Attempt to read beyond end of buffer");
+    }
 
-    PngData pngData(data, len);
-    png_byte header[8];
-    pngData.read(header, 8);
-    if (png_sig_cmp(header, 0, 8))
-        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedImageFormat, "The file could not be recognized as a PNG file");
+    memcpy(data, buffer->Data + buffer->Offset, length);
+    buffer->Offset += length;
+}
 
+void PdfImage::loadFromPngData(const unsigned char* data, size_t len, charbuff& buffer, PdfImageInfo& info)
+{
+    if (len < 8 || png_sig_cmp((png_bytep)data, 0, 8))
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedImageFormat, "The buffer could not be recognized as a PNG file");
+
+    PngMemoryBuffer memBuffer = { data, len, 8 };
     png_structp png;
     png_infop pnginfo;
     try
     {
         createPngContext(png, pnginfo);
-        png_set_read_fn(png, (png_voidp)&pngData, pngReadData);
-        loadFromPngContent(*this, png, pnginfo);
+        png_set_read_fn(png, &memBuffer, pngReadFromMemory);
+        loadFromPngContent(png, pnginfo, buffer, info);
     }
     catch (...)
     {
@@ -1029,7 +1113,7 @@ void PdfImage::loadFromPngData(const unsigned char* data, size_t len)
     png_destroy_read_struct(&png, &pnginfo, (png_infopp)nullptr);
 }
 
-void loadFromPngContent(PdfImage& image, png_structp png, png_infop pnginfo)
+void PdfImage::loadFromPngContent(png_structp png, png_infop pnginfo, charbuff& buffer, PdfImageInfo& info)
 {
     png_set_sig_bytes(png, 8);
     png_read_info(png, pnginfo);
@@ -1082,7 +1166,7 @@ void loadFromPngContent(PdfImage& image, png_structp png, png_infop pnginfo)
     // Read the file
     size_t rowLen = png_get_rowbytes(png, pnginfo);
     size_t len = rowLen * height;
-    charbuff buffer(len);
+    buffer.resize(len);
 
     unique_ptr<png_bytep[]> rows(new png_bytep[height]);
     for (unsigned int y = 0; y < height; y++)
@@ -1162,14 +1246,13 @@ void loadFromPngContent(PdfImage& image, png_structp png, png_infop pnginfo)
         smaksInfo.Width = (unsigned)width;
         smaksInfo.Height = (unsigned)height;
         smaksInfo.BitsPerComponent = (unsigned char)depth;
-        smaksInfo.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstace();
+        smaksInfo.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
 
-        auto smakeImage = image.GetDocument().CreateImage();
+        auto smakeImage = GetDocument().CreateImage();
         smakeImage->SetDataRaw(smask, smaksInfo);
-        image.SetSoftMask(*smakeImage);
+        SetSoftMask(*smakeImage);
     }
 
-    PdfImageInfo info;
     info.Width = (unsigned)width;
     info.Height = (unsigned)height;
     info.BitsPerComponent = (unsigned char)depth;
@@ -1189,19 +1272,17 @@ void loadFromPngContent(PdfImage& image, png_structp png, png_infop pnginfo)
         }
 
         info.ColorSpace = PdfColorSpaceInitializer(std::make_shared<PdfColorSpaceFilterIndexed>(
-            PdfColorSpaceFilterFactory::GetDeviceRGBInstace(), colorCount, std::move(data)));
+            PdfColorSpaceInitializer(PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr()),
+            colorCount, std::move(data)));
     }
     else if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
     {
-        info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstace();
+        info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
     }
     else
     {
-        info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceRGBInstace();
+        info.ColorSpace = PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr();
     }
-
-    // Set the image data and flate compress it
-    image.SetDataRaw(buffer, info);
 }
 
 void createPngContext(png_structp& png, png_infop& pnginfo)
@@ -1218,13 +1299,49 @@ void createPngContext(png_structp& png, png_infop& pnginfo)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "Error when reading the image");
 }
 
-void pngReadData(png_structp pngPtr, png_bytep data, png_size_t length)
-{
-    PngData* a = (PngData*)png_get_io_ptr(pngPtr);
-    a->read(data, length);
-}
-
 #endif // PODOFO_HAVE_PNG_LIB
+
+unique_ptr<PdfXObjectForm> PdfImage::getTransformation(PdfImageOrientation orientation)
+{
+    Matrix transformation;
+    switch (orientation)
+    {
+        case PdfImageOrientation::TopRight:
+            transformation = Matrix(-1, 0, 0, 1, m_Width, 0);
+            break;
+        case PdfImageOrientation::BottomRight:
+            transformation = Matrix(-1, 0, 0, -1, m_Width, m_Height);
+            break;
+        case PdfImageOrientation::BottomLeft:
+            transformation = Matrix(1, 0, 0, -1, 0, m_Height);
+            break;
+        case PdfImageOrientation::LeftTop:
+            transformation = Matrix(0, 1, -1, 0, m_Height, 0);
+            break;
+        case PdfImageOrientation::RightTop:
+            transformation = Matrix(0, 1, 1, 0, 0, 0);
+            break;
+        case PdfImageOrientation::RightBottom:
+            transformation = Matrix(0, -1, 1, 0, 0, m_Width);
+            break;
+        case PdfImageOrientation::LeftBottom:
+            transformation = Matrix(0, -1, -1, 0, m_Height, m_Width);
+            break;
+        case PdfImageOrientation::TopLeft:
+            // This would be the identity matrix, so it requires no transformation
+            return nullptr;
+        default:
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidEnumValue, "Invalid orientation");
+    }
+
+    auto actualXobj = GetDocument().CreateXObjectForm(GetRect());
+    static_cast<PdfResourceOperations&>(actualXobj->GetOrCreateResources()).AddResource(PdfResourceType::XObject, "XOb1"_n, GetObject());
+    PdfStringStream sstream;
+    PoDoFo::WriteOperator_Do(sstream, "XOb1");
+    actualXobj->GetObject().GetOrCreateStream().SetData(sstream.GetString());
+
+    return actualXobj;
+}
 
 void PdfImage::SetChromaKeyMask(int64_t r, int64_t g, int64_t b, int64_t threshold)
 {
@@ -1296,4 +1413,15 @@ void fetchPDFScanLineRGB(unsigned char* dstScanLine, unsigned width, const unsig
         default:
             PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedPixelFormat, "Unsupported pixel format");
     }
+}
+
+void invalidateImageInfo(PdfImageInfo& info)
+{
+    info.Width = 0;
+    info.Height = 0;
+    info.Filters = nullptr;
+    info.BitsPerComponent = 0;
+    info.ColorSpace = { };
+    info.DecodeArray.clear();
+    info.Orientation = PdfImageOrientation::Unknown;
 }

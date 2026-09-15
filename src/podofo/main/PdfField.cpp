@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfField.h"
@@ -30,12 +28,11 @@ using namespace PoDoFo;
 void getFullName(const PdfObject& obj, bool skipEscapePartialName, string& fullname);
 
 PdfField::PdfField(PdfAnnotationWidget& widget,
-        PdfFieldType fieldType, const shared_ptr<PdfField>& parent) :
+        PdfFieldType fieldType, shared_ptr<PdfField>&& parent) :
     PdfDictionaryElement(widget.GetObject()),
     m_Widget(&widget),
     m_AcroForm(nullptr),
-    m_FieldType(fieldType),
-    m_Parent(parent)
+    m_FieldType(fieldType)
 {
     if (parent == nullptr)
     {
@@ -43,18 +40,18 @@ PdfField::PdfField(PdfAnnotationWidget& widget,
     }
     else
     {
+        m_Parent = std::move(parent);
         // Set /Parent key to newly created field
-        GetDictionary().AddKey("Parent"_n, parent->GetObject().GetIndirectReference());
+        GetDictionary().AddKey("Parent"_n, (*m_Parent)->GetObject().GetIndirectReference());
     }
 }
 
 PdfField::PdfField(PdfAcroForm& acroform, PdfFieldType fieldType,
-        const shared_ptr<PdfField>& parent) :
+        shared_ptr<PdfField>&& parent) :
     PdfDictionaryElement(acroform.GetDocument()),
     m_Widget(nullptr),
     m_AcroForm(&acroform),
-    m_FieldType(fieldType),
-    m_Parent(parent)
+    m_FieldType(fieldType)
 {
     if (parent == nullptr)
     {
@@ -62,8 +59,9 @@ PdfField::PdfField(PdfAcroForm& acroform, PdfFieldType fieldType,
     }
     else
     {
+        m_Parent = std::move(parent);
         // Set /Parent key to newly created field
-        GetDictionary().AddKey("Parent"_n, parent->GetObject().GetIndirectReference());
+        GetDictionary().AddKey("Parent"_n, (*m_Parent)->GetObject().GetIndirectReference());
     }
 }
 
@@ -91,6 +89,11 @@ unique_ptr<PdfField> PdfField::CreateChild(PdfPage& page, const Rect& rect)
     return createChildField(&page, rect);
 }
 
+void PdfField::SetParent(shared_ptr<PdfField>&& parent)
+{
+    m_Parent = std::move(parent);
+}
+
 PdfField* PdfField::GetParentSafe()
 {
     initParent();
@@ -111,7 +114,7 @@ void PdfField::initParent()
     auto parent = GetDictionary().FindKey("Parent");
     if (parent == nullptr)
     {
-        m_Parent = nullptr;
+        m_Parent *= nullptr;
         return;
     }
 
@@ -124,6 +127,21 @@ void PdfField::initChildren()
 {
     if (m_Children == nullptr)
         m_Children.reset(new PdfFieldChildrenCollectionBase(*this));
+}
+
+void PdfField::ensureAccessibilityIfNeeded(const string_view& fieldName)
+{
+    if (GetDocument().GetMetadata().GetPdfUALevel() == PdfUALevel::Unknown
+        && !PoDoFo::IsAccessibiltyProfile(GetDocument().GetMetadata().GetPdfALevel()))
+    {
+        return;
+    }
+
+    // Set the /TU key
+    SetAlternateName(PdfString(string(getFieldTypeDisplayName()).append(" ").append(fieldName)));
+    auto widget = GetWidget();
+    if (widget != nullptr)
+        PoDoFo::CreateObjectStructElement(*this, widget->MustGetPage(), "Form"_n);
 }
 
 unique_ptr<PdfField> PdfField::createChildField(PdfPage* page, const Rect& rect)
@@ -158,12 +176,6 @@ unique_ptr<PdfField> PdfField::createChildField(PdfPage* page, const Rect& rect)
 }
 
 PdfField& PdfField::Create(const string_view& name,
-    PdfAnnotationWidget& widget, const type_info& typeInfo)
-{
-    return Create(name, widget, getFieldType(typeInfo));
-}
-
-PdfField& PdfField::Create(const string_view& name,
     PdfAnnotationWidget& widget, PdfFieldType type)
 {
     CHECK_FIELD_NAME(name);
@@ -192,11 +204,12 @@ PdfField& PdfField::Create(const string_view& name,
     {
         newField = createField(widget, type, nullptr, true);
         newField->setName(name);
+        newField->ensureAccessibilityIfNeeded(name);
     }
     else
     {
         // Prepare keys to remove that will stay on the parent
-        const vector<string> parentKeys{ "FT", "Ff", "T", "V", "Opt" };
+        constexpr string_view parentKeys[] = { "FT"sv, "Ff"sv, "T"sv, "TU"sv, "V"sv, "Opt"sv };
         if (!candidateParent->GetChildren().HasKidsArray())
         {
             PODOFO_INVARIANT(acroForm != null);
@@ -218,14 +231,9 @@ PdfField& PdfField::Create(const string_view& name,
         linkFieldObjectToParent(newField, *candidateParent, parentKeys, false, false);
     }
 
-    widget.SetField(newField);
-    return *newField;
-}
-
-unique_ptr<PdfField> PdfField::Create(const string_view& name,
-    PdfAcroForm& acroform, const type_info& typeInfo)
-{
-    return Create(name, acroform, getFieldType(typeInfo));
+    auto ret = newField.get();
+    widget.SetField(std::move(newField));
+    return *ret;
 }
 
 unique_ptr<PdfField> PdfField::Create(const string_view& name,
@@ -234,6 +242,7 @@ unique_ptr<PdfField> PdfField::Create(const string_view& name,
     CHECK_FIELD_NAME(name);
     auto ret = createField(acroform, type, nullptr);
     ret->setName(name);
+    ret->ensureAccessibilityIfNeeded(name);
     return ret;
 }
 
@@ -272,55 +281,55 @@ unique_ptr<PdfField> PdfField::Create(PdfObject& obj, PdfAcroForm& acroForm, Pdf
 }
 
 unique_ptr<PdfField> PdfField::createField(PdfAcroForm& acroform, PdfFieldType type,
-    const shared_ptr<PdfField>& parent)
+    shared_ptr<PdfField>&& parent)
 {
     switch (type)
     {
         case PdfFieldType::PushButton:
-            return unique_ptr<PdfField>(new PdfPushButton(acroform, parent));
+            return unique_ptr<PdfField>(new PdfPushButton(acroform, std::move(parent)));
         case PdfFieldType::CheckBox:
-            return unique_ptr<PdfField>(new PdfCheckBox(acroform, parent));
+            return unique_ptr<PdfField>(new PdfCheckBox(acroform, std::move(parent)));
         case PdfFieldType::RadioButton:
-            return unique_ptr<PdfField>(new PdfRadioButton(acroform, parent));
+            return unique_ptr<PdfField>(new PdfRadioButton(acroform, std::move(parent)));
         case PdfFieldType::TextBox:
-            return unique_ptr<PdfField>(new PdfTextBox(acroform, parent));
+            return unique_ptr<PdfField>(new PdfTextBox(acroform, std::move(parent)));
         case PdfFieldType::ComboBox:
-            return unique_ptr<PdfField>(new PdfComboBox(acroform, parent));
+            return unique_ptr<PdfField>(new PdfComboBox(acroform, std::move(parent)));
         case PdfFieldType::ListBox:
-            return unique_ptr<PdfField>(new PdfListBox(acroform, parent));
+            return unique_ptr<PdfField>(new PdfListBox(acroform, std::move(parent)));
         case PdfFieldType::Signature:
-            return unique_ptr<PdfField>(new PdfSignature(acroform, parent));
+            return unique_ptr<PdfField>(new PdfSignature(acroform, std::move(parent)));
         default:
             PODOFO_RAISE_ERROR(PdfErrorCode::InternalLogic);
     }
 }
 
 unique_ptr<PdfField> PdfField::createField(PdfAnnotationWidget& widget,
-    PdfFieldType type, const shared_ptr<PdfField>& parent, bool insertInAcroform)
+    PdfFieldType type, shared_ptr<PdfField>&& parent, bool insertInAcroform)
 {
     unique_ptr<PdfField> ret;
     switch (type)
     {
         case PdfFieldType::PushButton:
-            ret.reset(new PdfPushButton(widget, parent));
+            ret.reset(new PdfPushButton(widget, std::move(parent)));
             break;
         case PdfFieldType::CheckBox:
-            ret.reset(new PdfCheckBox(widget, parent));
+            ret.reset(new PdfCheckBox(widget, std::move(parent)));
             break;
         case PdfFieldType::RadioButton:
-            ret.reset(new PdfRadioButton(widget, parent));
+            ret.reset(new PdfRadioButton(widget, std::move(parent)));
             break;
         case PdfFieldType::TextBox:
-            ret.reset(new PdfTextBox(widget, parent));
+            ret.reset(new PdfTextBox(widget, std::move(parent)));
             break;
         case PdfFieldType::ComboBox:
-            ret.reset(new PdfComboBox(widget, parent));
+            ret.reset(new PdfComboBox(widget, std::move(parent)));
             break;
         case PdfFieldType::ListBox:
-            ret.reset(new PdfListBox(widget, parent));
+            ret.reset(new PdfListBox(widget, std::move(parent)));
             break;
         case PdfFieldType::Signature:
-            ret.reset(new PdfSignature(widget, parent));
+            ret.reset(new PdfSignature(widget, std::move(parent)));
             break;
         default:
             PODOFO_RAISE_ERROR(PdfErrorCode::InternalLogic);
@@ -330,26 +339,6 @@ unique_ptr<PdfField> PdfField::createField(PdfAnnotationWidget& widget,
         (void)widget.GetDocument().GetOrCreateAcroForm().CreateField(ret->GetObject(), ret->GetType());
 
     return ret;
-}
-
-PdfFieldType PdfField::getFieldType(const type_info& typeInfo)
-{
-    if (typeInfo == typeid(PdfPushButton))
-        return PdfFieldType::PushButton;
-    else if (typeInfo == typeid(PdfCheckBox))
-        return PdfFieldType::CheckBox;
-    else if (typeInfo == typeid(PdfRadioButton))
-        return PdfFieldType::RadioButton;
-    else if (typeInfo == typeid(PdfTextBox))
-        return PdfFieldType::TextBox;
-    else if (typeInfo == typeid(PdfComboBox))
-        return PdfFieldType::ComboBox;
-    else if (typeInfo == typeid(PdfListBox))
-        return PdfFieldType::ListBox;
-    else if (typeInfo == typeid(PdfSignature))
-        return PdfFieldType::Signature;
-    else
-        PODOFO_RAISE_ERROR(PdfErrorCode::InternalLogic);
 }
 
 shared_ptr<PdfField> PdfField::GetPtr()
@@ -375,6 +364,29 @@ PdfField* PdfField::getParentTyped(PdfFieldType type) const
     }
 
     return parent;
+}
+
+string_view PdfField::getFieldTypeDisplayName() const
+{
+    switch (m_FieldType)
+    {
+        case PdfFieldType::PushButton:
+            return "Push-button"sv;
+        case PdfFieldType::CheckBox:
+            return "Check box"sv;
+        case PdfFieldType::RadioButton:
+            return "Radio button"sv;
+        case PdfFieldType::TextBox:
+            return "Text box"sv;
+        case PdfFieldType::ComboBox:
+            return "Combo box"sv;
+        case PdfFieldType::ListBox:
+            return "List box"sv;
+        case PdfFieldType::Signature:
+            return "Signature"sv;
+        default:
+            PODOFO_RAISE_ERROR(PdfErrorCode::InvalidEnumValue);
+    }
 }
 
 bool PdfField::tryCreateField(PdfObject& obj, PdfFieldType type,
@@ -428,9 +440,9 @@ PdfFieldType PdfField::getFieldType(const PdfObject& obj)
         int64_t flags;
         PdfField::GetFieldFlags(obj, flags);
 
-        if ((flags & PdfButton::ePdfButton_PushButton) == PdfButton::ePdfButton_PushButton)
+        if ((flags & PdfButton::PdfButton_PushButton) == PdfButton::PdfButton_PushButton)
             ret = PdfFieldType::PushButton;
-        else if ((flags & PdfButton::ePdfButton_Radio) == PdfButton::ePdfButton_Radio)
+        else if ((flags & PdfButton::PdfButton_Radio) == PdfButton::PdfButton_Radio)
             ret = PdfFieldType::RadioButton;
         else
             ret = PdfFieldType::CheckBox;
@@ -444,7 +456,7 @@ PdfFieldType PdfField::getFieldType(const PdfObject& obj)
         int64_t flags;
         PdfField::GetFieldFlags(obj, flags);
 
-        if ((flags & PdChoiceField::ePdfListField_Combo) == PdChoiceField::ePdfListField_Combo)
+        if ((flags & PdChoiceField::PdfListField_Combo) == PdChoiceField::PdfListField_Combo)
             ret = PdfFieldType::ComboBox;
         else
             ret = PdfFieldType::ListBox;
@@ -467,11 +479,11 @@ void PdfField::init()
             break;
         case PdfFieldType::PushButton:
             dict.AddKey("FT"_n, "Btn"_n);
-            dict.AddKey("Ff"_n, (int64_t)PdfButton::ePdfButton_PushButton);
+            dict.AddKey("Ff"_n, (int64_t)PdfButton::PdfButton_PushButton);
             break;
         case PdfFieldType::RadioButton:
             dict.AddKey("FT"_n, "Btn"_n);
-            dict.AddKey("Ff"_n, (int64_t)(PdfButton::ePdfButton_Radio | PdfButton::ePdfButton_NoToggleOff));
+            dict.AddKey("Ff"_n, (int64_t)(PdfButton::PdfButton_Radio | PdfButton::PdfButton_NoToggleOff));
             break;
         case PdfFieldType::TextBox:
             dict.AddKey("FT"_n, "Tx"_n);
@@ -481,7 +493,7 @@ void PdfField::init()
             break;
         case PdfFieldType::ComboBox:
             dict.AddKey("FT"_n, "Ch"_n);
-            dict.AddKey("Ff"_n, (int64_t)PdChoiceField::ePdfListField_Combo);
+            dict.AddKey("Ff"_n, (int64_t)PdChoiceField::PdfListField_Combo);
             break;
         case PdfFieldType::Signature:
             dict.AddKey("FT"_n, "Sig"_n);
@@ -556,7 +568,13 @@ void PdfField::SetFieldFlag(int64_t value, bool set)
             curr ^= value;
     }
 
-    GetDictionary().AddKey("Ff"_n, curr);
+    // Field flags must be set on the parent, otherwise they won't
+    // be honored, e.g. ReadOnly. CHECK-ME: Does it apply to all flags?
+    auto parent = GetParentSafe();
+    if (parent == nullptr)
+        GetDictionary().AddKey("Ff"_n, curr);
+    else
+        parent->GetDictionary().AddKey("Ff"_n, curr);
 }
 
 bool PdfField::GetFieldFlag(int64_t value, bool defvalue) const
@@ -821,7 +839,7 @@ void PdfField::SetValidateAction(const PdfAction& action)
 
 // Link field and parent creating /P key and adding the field to /Kids
 void PdfField::linkFieldObjectToParent(const shared_ptr<PdfField>& field, PdfField& parentField,
-    const vector<string>& parentKeys, bool setParent, bool moveKeysToParent)
+    cspan<std::string_view> parentKeys, bool setParent, bool moveKeysToParent)
 {
     auto& fieldDict = field->GetDictionary();
     if (moveKeysToParent)

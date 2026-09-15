@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2023 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2023 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfStreamedDocument.h"
@@ -12,18 +10,18 @@
 using namespace std;
 using namespace PoDoFo;
 
-PdfStreamedDocument::PdfStreamedDocument(const shared_ptr<OutputStreamDevice>& device, PdfVersion version,
-        const shared_ptr<PdfEncrypt>& encrypt, PdfSaveOptions opts) :
-    m_Device(device),
-    m_Encrypt(encrypt)
+PdfStreamedDocument::PdfStreamedDocument(shared_ptr<OutputStreamDevice> device, PdfVersion version,
+        shared_ptr<PdfEncrypt> encrypt, PdfSaveOptions opts) :
+    m_Device(std::move(device)),
+    m_Encrypt(std::move(encrypt))
 {
     init(version, opts);
 }
 
 PdfStreamedDocument::PdfStreamedDocument(const string_view& filename, PdfVersion version,
-        const shared_ptr<PdfEncrypt>& encrypt, PdfSaveOptions opts) :
+        shared_ptr<PdfEncrypt> encrypt, PdfSaveOptions opts) :
     m_Device(new FileStreamDevice(filename, FileMode::Create)),
-    m_Encrypt(encrypt)
+    m_Encrypt(std::move(encrypt))
 {
     init(version, opts);
 }
@@ -47,6 +45,11 @@ void PdfStreamedDocument::SetPdfVersion(PdfVersion version)
 {
     (void)version;
     PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+}
+
+bool PdfStreamedDocument::HasOwnerPermissions() const
+{
+    return false; // PdfStreamedDocument does not have an encryption context
 }
 
 const PdfEncrypt* PdfStreamedDocument::GetEncrypt() const

@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2005 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2005 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include "PdfDeclarationsPrivate.h"
 #include "PdfWriter.h"
@@ -10,6 +8,7 @@
 #include <podofo/auxiliary/StreamDevice.h>
 #include <podofo/main/PdfDate.h>
 #include <podofo/main/PdfDictionary.h>
+#include "PdfCompressedObject.h"
 #include "PdfParserObject.h"
 #include "PdfXRefStream.h"
 #include "OpenSSLInternal.h"
@@ -23,36 +22,39 @@ using namespace PoDoFo;
 
 static PdfWriteFlags toWriteFlags(PdfSaveOptions opts, PdfALevel pdfaLevel);
 
-PdfWriter::PdfWriter(PdfIndirectObjectList* objects, const PdfObject& trailer) :
+PdfWriter::PdfWriter(PdfIndirectObjectList* objects, const PdfObject& trailer, size_t magicOffset) :
     m_Objects(objects),
     m_Trailer(&trailer),
-    m_Version(PdfVersionDefault),
+    m_MagicOffset(magicOffset),
+    m_VersionHint(PdfVersionDefault),
     m_PdfALevel(PdfALevel::Unknown),
+    m_UseXRefStreamHint(false),
+    m_Version(PdfVersionDefault),
     m_UseXRefStream(false),
     m_Encrypt(nullptr),
     m_EncryptObj(nullptr),
     m_SaveOptions(PdfSaveOptions::None),
     m_WriteFlags(PdfWriteFlags::None),
-    m_PrevXRefOffset(0),
-    m_IncrementalUpdate(false),
-    m_rewriteXRefTable(false)
+    m_PrevXRefOffset(0), // 0 is a sentinel for invalid XRef offset
+    m_CurrXRefOffset(0), // 0 is a sentinel for invalid XRef offset
+    m_IsIncrementalUpdate(false)
 {
 }
 
-PdfWriter::PdfWriter(PdfIndirectObjectList& objects, const PdfObject& trailer)
-    : PdfWriter(&objects, trailer)
+PdfWriter::PdfWriter(PdfIndirectObjectList& objects, const PdfObject& trailer,
+        size_t magicOffset)
+    : PdfWriter(&objects, trailer, magicOffset)
 {
 }
 
 PdfWriter::PdfWriter(PdfIndirectObjectList& objects)
-    : PdfWriter(&objects, PdfObject())
+    : PdfWriter(&objects, PdfObject(), 0)
 {
 }
 
-void PdfWriter::SetIncrementalUpdate(bool rewriteXRefTable)
+void PdfWriter::SetIncrementalUpdate(bool enabled)
 {
-    m_IncrementalUpdate = true;
-    m_rewriteXRefTable = rewriteXRefTable;
+    m_IsIncrementalUpdate = enabled;
 }
 
 PdfWriter::~PdfWriter()
@@ -65,8 +67,37 @@ void PdfWriter::initWriteFlags()
     m_WriteFlags = toWriteFlags(m_SaveOptions, m_PdfALevel);
 }
 
+bool PdfWriter::ShouldUseXRefStream(PdfSaveOptions opts, bool useXRefStreamHint)
+{
+    bool forceTable = (opts & PdfSaveOptions::ForceXRefTable) != PdfSaveOptions::None;
+    bool forceStream = (opts & PdfSaveOptions::ForceXRefStream) != PdfSaveOptions::None;
+    if (forceTable && forceStream)
+    {
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidInput, "PdfSaveOptions::ForceXRefTable and "
+            "PdfSaveOptions::ForceXRefStream are mutually exclusive");
+    }
+
+    if (forceTable)
+        return false;
+    else if (forceStream)
+        return true;
+    else
+        return useXRefStreamHint;
+}
+
+void PdfWriter::InitWriteState()
+{
+    m_UseXRefStream = ShouldUseXRefStream(m_SaveOptions, m_UseXRefStreamHint);
+    m_Version = m_VersionHint;
+    if (m_UseXRefStream && m_Version < PdfVersion::V1_5)
+        m_Version = PdfVersion::V1_5;
+}
+
 void PdfWriter::Write(OutputStreamDevice& device)
 {
+    InitWriteState();
+    size_t writeOffset = device.GetPosition();
+
     CreateFileIdentifier(m_identifier, *m_Trailer, &m_originalIdentifier);
 
     // setup encrypt dictionary
@@ -74,9 +105,28 @@ void PdfWriter::Write(OutputStreamDevice& device)
     {
         m_Encrypt->GetEncrypt().EnsureEncryptionInitialized(m_identifier, m_Encrypt->GetContext());
 
-        // Add our own Encryption dictionary
-        m_EncryptObj = &m_Objects->CreateDictionaryObject();
-        m_Encrypt->GetEncrypt().CreateEncryptionDictionary(m_EncryptObj->GetDictionary());
+        if (m_EncryptObj == nullptr)
+            m_EncryptObj = getExistingEncryptObject();
+
+        if (m_EncryptObj == nullptr)
+        {
+            m_EncryptObj = &m_Objects->CreateDictionaryObject();
+            m_Encrypt->GetEncrypt().CreateEncryptionDictionary(m_EncryptObj->GetDictionary());
+        }
+        else if (!m_IsIncrementalUpdate)
+        {
+            // NOTE: An update can't re-key the document, so the parsed
+            // dictionary is left untouched there: recreating it may drop
+            // optional entries and would be reported as a change to a
+            // certified document
+            PdfDictionary encryptDict;
+            m_Encrypt->GetEncrypt().CreateEncryptionDictionary(encryptDict);
+            auto& currDict = m_EncryptObj->GetDictionary();
+            // Refresh the dictionary only if the encryption actually changed:
+            // an untouched one stays clean and is not rewritten on updates
+            if (currDict != encryptDict)
+                currDict = std::move(encryptDict);
+        }
     }
 
     unique_ptr<PdfXRef> xRef;
@@ -87,37 +137,52 @@ void PdfWriter::Write(OutputStreamDevice& device)
 
     try
     {
-        if (!m_IncrementalUpdate)
+        // Restore the position if delayed object loading moved it,
+        // as when retrieving existing encrypt object above
+        if (device.GetPosition() != writeOffset)
+            device.Seek(writeOffset);
+
+        if (m_IsIncrementalUpdate)
+        {
+            if (m_PrevXRefOffset == 0)
+                PoDoFo::LogMessage(PdfLogSeverity::Warning,
+                    "Writing an update with previously read invalid XRef sections. "
+                    "The cross references will be fully rewritten");
+        }
+        else
+        {
             WritePdfHeader(device);
+        }
 
         WritePdfObjects(device, *m_Objects, *xRef);
-
-        if (m_IncrementalUpdate)
-            xRef->SetFirstEmptyBlock();
-
         xRef->Write(device, m_buffer);
+        m_CurrXRefOffset = xRef->GetOffset();
     }
     catch (PdfError& e)
     {
-        // P.Zent: Delete Encryption dictionary (cannot be reused)
-        if (m_EncryptObj != nullptr)
-        {
-            m_Objects->RemoveObject(m_EncryptObj->GetIndirectReference());
-            m_EncryptObj = nullptr;
-        }
-
         PODOFO_PUSH_FRAME(e);
         throw;
     }
 
-    // P.Zent: Delete Encryption dictionary (cannot be reused)
-    if (m_EncryptObj != nullptr)
-    {
-        m_Objects->RemoveObject(m_EncryptObj->GetIndirectReference());
-        m_EncryptObj = nullptr;
-    }
-
     device.Flush();
+    m_Objects->ClearFreeObjectsDelta();
+}
+
+// Retrieve the encryption dictionary of the document, so it can be reused:
+// creating a new one would alter the document security and invalidate
+// existing certifications when writing incremental updates
+PdfObject* PdfWriter::getExistingEncryptObject()
+{
+    auto encryptObj = m_Trailer->GetDictionary().GetKey("Encrypt");
+    PdfReference encryptRef;
+    if (encryptObj == nullptr || !encryptObj->TryGetReference(encryptRef))
+        return nullptr;
+
+    auto ret = m_Objects->GetObject(encryptRef);
+    if (ret == nullptr || !ret->IsDictionary())
+        return nullptr;
+
+    return ret;
 }
 
 void PdfWriter::WritePdfHeader(OutputStreamDevice& device)
@@ -136,32 +201,41 @@ void PdfWriter::WritePdfObjects(OutputStreamDevice& device, const PdfIndirectObj
         else
             encrypt.reset();
 
-        if (m_IncrementalUpdate && !obj->IsDirty())
+        if (m_IsIncrementalUpdate && !obj->IsDirty())
         {
-            if (m_rewriteXRefTable)
+            if (m_PrevXRefOffset == 0)
             {
+                // The previous XRef was not read successfully and needs rewriting,
+                // try to see if we can just write the previous object offset in the
+                // entry without fully rewriting it
                 PdfParserObject* parserObject = dynamic_cast<PdfParserObject*>(obj);
                 if (parserObject != nullptr)
                 {
-                    // Try to see if we can just write the reference to previous entry
-                    // without rewriting the entry
-
-                    // the reference looks like "0 0 R", while the object identifier like "0 0 obj", thus add two letters
-                    size_t objRefLength = obj->GetIndirectReference().ToString().length() + 2;
-
-                    // the offset points just after the "0 0 obj" string
-                    if (parserObject->GetOffset() - objRefLength > 0)
+                    if (parserObject->GetOffset() > 0)
                     {
-                        xref.AddInUseObject(obj->GetIndirectReference(), parserObject->GetOffset() - objRefLength);
+                        xref.AddInUseObject(obj->GetIndirectReference(), parserObject->GetOffset() - m_MagicOffset);
                         continue;
                     }
                 }
             }
             else
             {
-                // The object will not be output in the XRef entries but it will be
-                // counted in trailer's /Size
-                xref.AddInUseObject(obj->GetIndirectReference(), nullptr);
+                // It's a regular incremental update, just skip processing the object
+                continue;
+            }
+        }
+
+        if (!m_IsIncrementalUpdate && m_UseXRefStream && !obj->IsDirty())
+        {
+            // An unmodified object stored in a preserved object stream is not
+            // rewritten: the object stream is written as it is and the object
+            // is addressed with a compressed entry
+            auto compressedObj = dynamic_cast<const PdfCompressedObject*>(obj);
+            if (compressedObj != nullptr
+                && objects.IsCompressedObjectStream(compressedObj->GetObjectStreamNumber()))
+            {
+                xref.AddCompressedObject(obj->GetIndirectReference().ObjectNumber(),
+                    compressedObj->GetObjectStreamNumber(), compressedObj->GetIndex());
                 continue;
             }
         }
@@ -174,15 +248,38 @@ void PdfWriter::WritePdfObjects(OutputStreamDevice& device, const PdfIndirectObj
         }
         else
         {
-            xref.AddInUseObject(obj->GetIndirectReference(), device.GetPosition());
+            xref.AddInUseObject(obj->GetIndirectReference(), device.GetPosition() - m_MagicOffset);
             // Also make sure that we do not encrypt the encryption dictionary!
             obj->WriteFinal(device, m_WriteFlags, encrypt.get(), m_buffer);
         }
     }
 
-    for (auto& freeObjectRef : objects.GetFreeObjects())
+    if (!m_IsIncrementalUpdate || m_PrevXRefOffset == 0)
     {
-        xref.AddFreeObject(freeObjectRef);
+        // It's a regular save, or the previous XRef was not read
+        // successfully and needs rewriting: add to the XRef all
+        // free/unavailable objects NOTE: It's not necessary to add
+        // unavailable objects, they will be handled implicitly as when
+        // the object is not defined it's treated as unavailable
+        for (auto& freeObjectRef : objects.GetFreeObjects())
+            xref.AddFreeObject(freeObjectRef);
+    }
+    else
+    {
+        // Write only the entries whose free state changed since the last save
+        for (uint32_t objNum : objects.GetFreeObjectsDelta())
+        {
+            PdfReference ref;
+            if (objects.TryFindFreeObject(objNum, ref))
+            {
+                xref.AddFreeObject(ref);
+            }
+            else
+            {
+                PODOFO_ASSERT(objects.GetUnavailableObjects().find(objNum) != objects.GetUnavailableObjects().end());
+                xref.AddUnavailableObject(objNum);
+            }
+        }
     }
 }
 
@@ -205,7 +302,7 @@ void PdfWriter::FillTrailerObject(PdfObject& trailer, size_t size, bool onlySize
         PdfArray array;
         // The ID must stay the same if this is an incremental update
         // or the /Encrypt entry was parsed
-        if ((m_IncrementalUpdate || (m_Encrypt != nullptr && m_Encrypt->GetEncrypt().IsParsed())) && !m_originalIdentifier.IsEmpty())
+        if ((m_IsIncrementalUpdate || (m_Encrypt != nullptr && m_Encrypt->GetEncrypt().IsParsed())) && !m_originalIdentifier.IsEmpty())
             array.Add(m_originalIdentifier);
         else
             array.Add(m_identifier);
@@ -215,11 +312,10 @@ void PdfWriter::FillTrailerObject(PdfObject& trailer, size_t size, bool onlySize
         // finally add the key to the trailer dictionary
         trailer.GetDictionary().AddKey("ID"_n, array);
 
-        if (!m_rewriteXRefTable && m_PrevXRefOffset > 0)
-        {
-            PdfVariant value(m_PrevXRefOffset);
-            trailer.GetDictionary().AddKey("Prev"_n, value);
-        }
+        // If the previous XRef was read successfully, just make add
+        // a /Prev pointer to it
+        if (m_PrevXRefOffset > 0)
+            trailer.GetDictionary().AddKey("Prev"_n, (int64_t)(m_PrevXRefOffset - m_MagicOffset));
     }
 }
 
@@ -324,14 +420,6 @@ void PdfWriter::SetEncryptObj(PdfObject& obj)
 void PdfWriter::SetEncrypt(PdfEncryptSession& encrypt)
 {
     m_Encrypt = &encrypt;
-}
-
-void PdfWriter::SetUseXRefStream(bool useXRefStream)
-{
-    if (useXRefStream && m_Version < PdfVersion::V1_5)
-        m_Version = PdfVersion::V1_5;
-
-    m_UseXRefStream = useXRefStream;
 }
 
 PdfWriteFlags toWriteFlags(PdfSaveOptions opts, PdfALevel pdfaLevel)

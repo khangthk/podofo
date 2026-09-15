@@ -1,14 +1,12 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfColorSpaceFilter.h"
 #include "PdfArray.h"
 #include "PdfDictionary.h"
 #include "PdfIndirectObjectList.h"
+#include "PdfColorSpace.h"
 
 using namespace std;
 using namespace PoDoFo;
@@ -25,141 +23,6 @@ bool PdfColorSpaceFilter::IsRawEncoded() const
 bool PdfColorSpaceFilter::IsTrivial() const
 {
     return false;
-}
-
-// TODO: pdfjs does some caching of the map based on object reference, we should do it as well
-bool PdfColorSpaceFilterFactory::TryCreateFromObject(const PdfObject& obj, PdfColorSpaceFilterPtr& colorSpace)
-{
-    const PdfArray* arr;
-    PdfColorSpaceType type;
-    if (obj.TryGetArray(arr))
-    {
-        if (arr->GetSize() == 0)
-        {
-            PoDoFo::LogMessage(PdfLogSeverity::Warning, "Invalid color space");
-            return false;
-        }
-
-        const PdfName* name;
-        if (!arr->MustFindAt(0).TryGetName(name) || !PoDoFo::TryConvertTo(*name, type))
-            return false;
-
-        switch (type)
-        {
-            case PdfColorSpaceType::Indexed:
-            {
-                const PdfObjectStream* stream;
-                charbuff lookup;
-                int64_t maxIndex;
-                PdfColorSpaceFilterPtr baseColorSpace;
-                unsigned short componentCount;
-                if (arr->GetSize() < 4)
-                    goto InvalidIndexed; // Invalid array entry count
-
-                if (!TryCreateFromObject(arr->MustFindAt(1), baseColorSpace))
-                    goto InvalidIndexed;
-
-                if (!arr->MustFindAt(2).TryGetNumber(maxIndex) && maxIndex < 1)
-                    goto InvalidIndexed;
-
-                stream = arr->MustFindAt(3).GetStream();
-                if (stream == nullptr)
-                    goto InvalidIndexed;
-
-                switch (baseColorSpace->GetPixelFormat())
-                {
-                    case PdfColorSpacePixelFormat::RGB:
-                        componentCount = 3;
-                        break;
-                    default:
-                        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedFilter, "Unsupported base color space in /Indexed color space");
-                }
-
-                lookup = stream->GetCopy();
-                if (lookup.size() < componentCount * ((unsigned)maxIndex + 1))
-                    goto InvalidIndexed;        // Table has invalid lookup map size
-
-                colorSpace.reset(new PdfColorSpaceFilterIndexed(baseColorSpace, (unsigned)maxIndex + 1, std::move(lookup)));
-                return true;
-
-            InvalidIndexed:
-                PoDoFo::LogMessage(PdfLogSeverity::Warning, "Invalid /Indexed color space name");
-                return false;
-            }
-            default:
-                PoDoFo::LogMessage(PdfLogSeverity::Warning, "Unsupported color space filter {}", name->GetString());
-                return false;
-        }
-    }
-    else
-    {
-        const PdfName* name;
-        if (!obj.TryGetName(name) || !PoDoFo::TryConvertTo(name->GetString(), type))
-            return false;
-
-        switch (type)
-        {
-            case PdfColorSpaceType::DeviceGray:
-            {
-                colorSpace = GetDeviceGrayInstace();
-                return true;
-            }
-            case PdfColorSpaceType::DeviceRGB:
-            {
-                colorSpace = GetDeviceRGBInstace();
-                return true;
-            }
-            case PdfColorSpaceType::DeviceCMYK:
-            {
-                colorSpace = GetDeviceCMYKInstace();
-                return true;
-            }
-            default:
-            {
-                PoDoFo::LogMessage(PdfLogSeverity::Warning, "Unsupported color space filter {}", name->GetString());
-                return false;
-            }
-        }
-    }
-}
-
-PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetTrivialFilter(PdfColorSpaceType type)
-{
-    switch (type)
-    {
-        case PdfColorSpaceType::DeviceRGB:
-            return GetDeviceRGBInstace();
-        case PdfColorSpaceType::DeviceGray:
-            return GetDeviceGrayInstace();
-        case PdfColorSpaceType::DeviceCMYK:
-            return GetDeviceCMYKInstace();
-        default:
-            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::CannotConvertColor, "Invalid color space");
-    }
-}
-
-PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetUnkownInstance()
-{
-    static shared_ptr<PdfColorSpaceFilterUnkown> s_unknown(new PdfColorSpaceFilterUnkown());
-    return s_unknown;
-}
-
-PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetDeviceGrayInstace()
-{
-    static shared_ptr<PdfColorSpaceDeviceGray> s_deviceGray(new PdfColorSpaceDeviceGray());
-    return s_deviceGray;
-}
-
-PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetDeviceRGBInstace()
-{
-    static shared_ptr<PdfColorSpaceFilterDeviceRGB> s_deviceRGB(new PdfColorSpaceFilterDeviceRGB());
-    return s_deviceRGB;
-}
-
-PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetDeviceCMYKInstace()
-{
-    static shared_ptr<PdfColorSpaceFilterDeviceCMYK> s_deviceCMYK(new PdfColorSpaceFilterDeviceCMYK());
-    return s_deviceCMYK;
 }
 
 PdfColorSpaceDeviceGray::PdfColorSpaceDeviceGray() { }
@@ -199,13 +62,13 @@ void PdfColorSpaceDeviceGray::FetchScanLine(unsigned char* dstScanLine, const un
     std::memcpy(dstScanLine, srcScanLine, width * bitsPerComponent / 8);
 }
 
-PdfObject PdfColorSpaceDeviceGray::GetExportObject(PdfIndirectObjectList& objects) const
+PdfVariant PdfColorSpaceDeviceGray::GetExportObject(PdfIndirectObjectList& objects) const
 {
     (void)objects;
     return "DeviceGray"_n;
 }
 
-unsigned PdfColorSpaceDeviceGray::GetColorComponentCount() const
+unsigned char PdfColorSpaceDeviceGray::GetColorComponentCount() const
 {
     return 1;
 }
@@ -247,13 +110,13 @@ void PdfColorSpaceFilterDeviceRGB::FetchScanLine(unsigned char* dstScanLine, con
     std::memcpy(dstScanLine, srcScanLine, 3 * width * bitsPerComponent / 8);
 }
 
-PdfObject PdfColorSpaceFilterDeviceRGB::GetExportObject(PdfIndirectObjectList& objects) const
+PdfVariant PdfColorSpaceFilterDeviceRGB::GetExportObject(PdfIndirectObjectList& objects) const
 {
     (void)objects;
     return "DeviceRGB"_n;
 }
 
-unsigned PdfColorSpaceFilterDeviceRGB::GetColorComponentCount() const
+unsigned char PdfColorSpaceFilterDeviceRGB::GetColorComponentCount() const
 {
     return 3;
 }
@@ -295,19 +158,27 @@ void PdfColorSpaceFilterDeviceCMYK::FetchScanLine(unsigned char* dstScanLine, co
     std::memcpy(dstScanLine, srcScanLine, 4 * width * bitsPerComponent / 8);
 }
 
-PdfObject PdfColorSpaceFilterDeviceCMYK::GetExportObject(PdfIndirectObjectList& objects) const
+PdfVariant PdfColorSpaceFilterDeviceCMYK::GetExportObject(PdfIndirectObjectList& objects) const
 {
     (void)objects;
     return "DeviceCMYK"_n;
 }
 
-unsigned PdfColorSpaceFilterDeviceCMYK::GetColorComponentCount() const
+unsigned char PdfColorSpaceFilterDeviceCMYK::GetColorComponentCount() const
 {
     return 4;
 }
 
-PdfColorSpaceFilterIndexed::PdfColorSpaceFilterIndexed(const PdfColorSpaceFilterPtr& baseColorSpace, unsigned mapSize, charbuff&& lookup)
-    : m_BaseColorSpace(baseColorSpace), m_MapSize(mapSize), m_lookup(std::move(lookup))
+PdfColorSpaceFilterIndexed::PdfColorSpaceFilterIndexed(PdfColorSpaceInitializer&& baseColorSpace, unsigned mapSize, charbuff lookup)
+    : m_MapSize(mapSize), m_lookup(std::move(lookup))
+{
+    m_BaseColorSpace = baseColorSpace.Take(m_colorSpaceExpVar);
+    if (m_BaseColorSpace == nullptr)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "The base color space must be not null");
+}
+
+PdfColorSpaceFilterIndexed::PdfColorSpaceFilterIndexed(PdfColorSpaceFilterPtr&& baseColorSpace, unsigned mapSize, charbuff&& lookup)
+    : m_BaseColorSpace(std::move(baseColorSpace)), m_MapSize(mapSize), m_lookup(std::move(lookup))
 {
 }
 
@@ -323,18 +194,20 @@ PdfColorSpacePixelFormat PdfColorSpaceFilterIndexed::GetPixelFormat() const
 
 unsigned PdfColorSpaceFilterIndexed::GetSourceScanLineSize(unsigned width, unsigned bitsPerComponent) const
 {
-    // bitsPerComponent Ignored in /Indexed source scan line size. The "lookup" table
-    // always map to color components that are 8 bits size long
-    (void)bitsPerComponent;
-    return width;
+    // The source samples are index values packed at /BitsPerComponent bits each.
+    // Rows are byte-aligned.
+    return (width * bitsPerComponent + 8 - 1) / 8;
 }
 
 unsigned PdfColorSpaceFilterIndexed::GetScanLineSize(unsigned width, unsigned bitsPerComponent) const
 {
+    // The output is always 8-bit components of the base color space, regardless
+    // of the source /BitsPerComponent used to pack the indices
+    (void)bitsPerComponent;
     switch (m_BaseColorSpace->GetPixelFormat())
     {
         case PdfColorSpacePixelFormat::RGB:
-            return (3 * width * bitsPerComponent + 8 - 1) / 8;
+            return 3 * width;
         default:
             PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedFilter, "Unsupported base color space in /Indexed color space");
     }
@@ -346,44 +219,79 @@ void PdfColorSpaceFilterIndexed::FetchScanLine(unsigned char* dstScanLine, const
     {
         case PdfColorSpaceType::DeviceRGB:
         {
-            if (bitsPerComponent == 8)
+            auto lookup = (const unsigned char*)m_lookup.data();
+            // For /Indexed images only 1, 2, 4 and 8 are valid, since "hival shall be no
+            // greater than 255", as stated in ISO 32000-2:2020 8.6.6.3 "Indexed colour spaces"
+            switch (bitsPerComponent)
             {
-                for (unsigned i = 0; i < width; i++)
+                case 8:
                 {
-                    PODOFO_INVARIANT(srcScanLine[i] < m_MapSize);
-                    const unsigned char* mappedColor = (const unsigned char*)(m_lookup.data() + srcScanLine[i] * 3);
-                    *(dstScanLine + i * 3 + 0) = mappedColor[0];
-                    *(dstScanLine + i * 3 + 1) = mappedColor[1];
-                    *(dstScanLine + i * 3 + 2) = mappedColor[2];
+                    // Fast path: one index per byte, direct lookup
+                    for (unsigned i = 0; i < width; i++)
+                    {
+                        // Clamp the index on out-of-bounds palette access
+                        unsigned index = srcScanLine[i];
+                        if (index >= m_MapSize)
+                            index = m_MapSize - 1;
+
+                        auto mappedColor = lookup + index * 3;
+                        dstScanLine[i * 3 + 0] = mappedColor[0];
+                        dstScanLine[i * 3 + 1] = mappedColor[1];
+                        dstScanLine[i * 3 + 2] = mappedColor[2];
+                    }
+                    break;
                 }
-            }
-            else
-            {
-                PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedFilter, "/BitsPerComponent != 8");
+                case 4:
+                case 2:
+                case 1:
+                {
+                    // Indices packed most significant bit first within each byte, rows byte-aligned
+                    const unsigned mask = (1u << bitsPerComponent) - 1u; // Eg. for 4bpc, mask is 111b -> 0x0F
+                    unsigned bitOffset = 0;
+                    for (unsigned i = 0; i < width; i++)
+                    {
+                        unsigned inPixelShift = 8 - bitsPerComponent - (bitOffset % 8);
+                        unsigned index = (srcScanLine[bitOffset >> 3] >> inPixelShift) & mask;
+                        bitOffset += bitsPerComponent;
+
+                        // Clamp the index on out-of-bounds palette access
+                        if (index >= m_MapSize)
+                            index = m_MapSize - 1;
+
+                        auto mappedColor = lookup + index * 3;
+                        dstScanLine[i * 3 + 0] = mappedColor[0];
+                        dstScanLine[i * 3 + 1] = mappedColor[1];
+                        dstScanLine[i * 3 + 2] = mappedColor[2];
+                    }
+                    break;
+                }
+                default:
+                    PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedFilter, "Unsupported {} /BitsPerComponent in /Indexed color space", bitsPerComponent);
             }
             break;
         }
         default:
             PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedFilter, "Unsupported base color space in /Indexed color space");
     }
-
-
 }
 
-PdfObject PdfColorSpaceFilterIndexed::GetExportObject(PdfIndirectObjectList& objects) const
+PdfVariant PdfColorSpaceFilterIndexed::GetExportObject(PdfIndirectObjectList& objects) const
 {
     auto& lookupObj = objects.CreateDictionaryObject();
+    if (m_colorSpaceExpVar.IsNull())
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::NotImplemented, "Unsupported serializing null base color space");
+
     lookupObj.GetOrCreateStream().SetData(m_lookup);
 
     PdfArray arr;
     arr.Add("Indexed"_n);
-    arr.Add(m_BaseColorSpace->GetExportObject(objects));
+    arr.Add(m_colorSpaceExpVar);
     arr.Add(static_cast<int64_t>(m_MapSize - 1));
     arr.Add(lookupObj.GetIndirectReference());
     return arr;
 }
 
-unsigned PdfColorSpaceFilterIndexed::GetColorComponentCount() const
+unsigned char PdfColorSpaceFilterIndexed::GetColorComponentCount() const
 {
     return 1;
 }
@@ -423,13 +331,13 @@ void PdfColorSpaceFilterUnkown::FetchScanLine(unsigned char* dstScanLine, const 
     PODOFO_RAISE_ERROR_INFO(PdfErrorCode::NotImplemented, "Operation unsupported in unknown type color space");
 }
 
-PdfObject PdfColorSpaceFilterUnkown::GetExportObject(PdfIndirectObjectList& objects) const
+PdfVariant PdfColorSpaceFilterUnkown::GetExportObject(PdfIndirectObjectList& objects) const
 {
     (void)objects;
     PODOFO_RAISE_ERROR_INFO(PdfErrorCode::NotImplemented, "Operation unsupported in unknown type color space");
 }
 
-unsigned PdfColorSpaceFilterUnkown::GetColorComponentCount() const
+unsigned char PdfColorSpaceFilterUnkown::GetColorComponentCount() const
 {
     PODOFO_RAISE_ERROR_INFO(PdfErrorCode::NotImplemented, "Operation unsupported in unknown type color space");
 }
@@ -465,38 +373,68 @@ PdfColorSpaceType PdfColorSpaceFilterSeparation::GetType() const
 
 bool PdfColorSpaceFilterSeparation::IsRawEncoded() const
 {
-    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+    // The tint component needs to be mapped through FetchScanLine
+    return false;
 }
 
 PdfColorSpacePixelFormat PdfColorSpaceFilterSeparation::GetPixelFormat() const
 {
-    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+    return PdfColorSpacePixelFormat::Grayscale;
 }
 
 unsigned PdfColorSpaceFilterSeparation::GetSourceScanLineSize(unsigned width, unsigned bitsPerComponent) const
 {
-    (void)width;
-    (void)bitsPerComponent;
-    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+    // The source is a single tint component packed at /BitsPerComponent bits, rows byte-aligned
+    return (width * bitsPerComponent + 8 - 1) / 8;
 }
 
 unsigned PdfColorSpaceFilterSeparation::GetScanLineSize(unsigned width, unsigned bitsPerComponent) const
 {
-    (void)width;
+    // The output is a single 8-bit grayscale component per pixel
     (void)bitsPerComponent;
-    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+    return width;
 }
 
 void PdfColorSpaceFilterSeparation::FetchScanLine(unsigned char* dstScanLine, const unsigned char* srcScanLine, unsigned width, unsigned bitsPerComponent) const
 {
-    (void)dstScanLine;
-    (void)srcScanLine;
-    (void)width;
-    (void)bitsPerComponent;
-    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+    // HACK: Treat the single tint component as an inverted grayscale value (tint 1 -> black)
+    // without evaluating the tint transform function
+    switch (bitsPerComponent)
+    {
+        case 16:
+        {
+            // Keep only the most significant byte of each 16-bit sample
+            for (unsigned i = 0; i < width; i++)
+                dstScanLine[i] = (unsigned char)(255 - srcScanLine[i * 2]);
+            break;
+        }
+        case 8:
+        {
+            for (unsigned i = 0; i < width; i++)
+                dstScanLine[i] = (unsigned char)(255 - srcScanLine[i]);
+            break;
+        }
+        case 4:
+        case 2:
+        case 1:
+        {
+            const unsigned mask = (1u << bitsPerComponent) - 1u;
+            unsigned bitOffset = 0;
+            for (unsigned i = 0; i < width; i++)
+            {
+                unsigned inPixelShift = 8 - bitsPerComponent - (bitOffset % 8);
+                unsigned tint = (srcScanLine[bitOffset >> 3] >> inPixelShift) & mask;
+                bitOffset += bitsPerComponent;
+                dstScanLine[i] = (unsigned char)(255 - (tint * 255 / mask));
+            }
+            break;
+        }
+        default:
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedFilter, "Unsupported {} /BitsPerComponent in /Separation color space", bitsPerComponent);
+    }
 }
 
-PdfObject PdfColorSpaceFilterSeparation::GetExportObject(PdfIndirectObjectList& objects) const
+PdfVariant PdfColorSpaceFilterSeparation::GetExportObject(PdfIndirectObjectList& objects) const
 {
     // Build color-spaces for separation
     auto& csTintFunc = objects.CreateDictionaryObject();
@@ -632,7 +570,7 @@ PdfObject PdfColorSpaceFilterSeparation::GetExportObject(PdfIndirectObjectList& 
     }
 }
 
-unsigned PdfColorSpaceFilterSeparation::GetColorComponentCount() const
+unsigned char PdfColorSpaceFilterSeparation::GetColorComponentCount() const
 {
     return 1;
 }
@@ -644,7 +582,7 @@ const PdfColorRaw& PdfColorSpaceFilterSeparation::GetAlternateColor() const
 
 const PdfColorSpaceFilter& PdfColorSpaceFilterSeparation::GetColorSpace() const
 {
-    return *PdfColorSpaceFilterFactory::GetTrivialFilter(m_AlternateColor.GetColorSpace());
+    return *PdfColorSpaceFilterFactory::GetTrivialFilterPtr(m_AlternateColor.GetColorSpace());
 }
 
 PdfColorSpaceFilterLab::PdfColorSpaceFilterLab(const array<double, 3>& whitePoint,
@@ -694,7 +632,7 @@ void PdfColorSpaceFilterLab::FetchScanLine(unsigned char* dstScanLine, const uns
     PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
 }
 
-PdfObject PdfColorSpaceFilterLab::GetExportObject(PdfIndirectObjectList& objects) const
+PdfVariant PdfColorSpaceFilterLab::GetExportObject(PdfIndirectObjectList& objects) const
 {
     auto& labDict = objects.CreateDictionaryObject().GetDictionary();
     PdfArray arr;
@@ -728,14 +666,22 @@ PdfObject PdfColorSpaceFilterLab::GetExportObject(PdfIndirectObjectList& objects
     return labArr;
 }
 
-unsigned PdfColorSpaceFilterLab::GetColorComponentCount() const
+unsigned char PdfColorSpaceFilterLab::GetColorComponentCount() const
 {
     return 3;
 }
 
-PdfColorSpaceFilterICCBased::PdfColorSpaceFilterICCBased(const PdfColorSpaceFilterPtr& alternateColorSpace,
-        charbuff&& iccprofile)
-    : m_AlternateColorSpace(alternateColorSpace), m_iccprofile(std::move(iccprofile))
+PdfColorSpaceFilterICCBased::PdfColorSpaceFilterICCBased(PdfColorSpaceInitializer&& alternateColorSpace,
+        charbuff iccprofile)
+    : m_iccprofile(std::move(iccprofile))
+{
+    m_AlternateColorSpace = alternateColorSpace.Take(m_colorSpaceExpVar);
+    if (m_AlternateColorSpace == nullptr)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "The alternate color space must be not null");
+}
+
+PdfColorSpaceFilterICCBased::PdfColorSpaceFilterICCBased(PdfColorSpaceFilterPtr&& alternateColorSpace, charbuff&& iccprofile)
+    : m_AlternateColorSpace(std::move(alternateColorSpace)), m_iccprofile(std::move(iccprofile))
 {
 }
 
@@ -772,11 +718,14 @@ void PdfColorSpaceFilterICCBased::FetchScanLine(unsigned char* dstScanLine, cons
     PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
 }
 
-PdfObject PdfColorSpaceFilterICCBased::GetExportObject(PdfIndirectObjectList& objects) const
+PdfVariant PdfColorSpaceFilterICCBased::GetExportObject(PdfIndirectObjectList& objects) const
 {
     // Create a colorspace object
     auto& iccObject = objects.CreateDictionaryObject();
-    iccObject.GetDictionary().AddKey("Alternate"_n, m_AlternateColorSpace->GetExportObject(objects));
+    if (m_colorSpaceExpVar.IsNull())
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::NotImplemented, "Unsupported serializing null alternate color space");
+
+    iccObject.GetDictionary().AddKey("Alternate"_n, m_colorSpaceExpVar);
     iccObject.GetDictionary().AddKey("N"_n, static_cast<int64_t>(m_AlternateColorSpace->GetColorComponentCount()));
     iccObject.GetOrCreateStream().SetData(m_iccprofile);
 
@@ -787,7 +736,352 @@ PdfObject PdfColorSpaceFilterICCBased::GetExportObject(PdfIndirectObjectList& ob
     return arr;
 }
 
-unsigned PdfColorSpaceFilterICCBased::GetColorComponentCount() const
+unsigned char PdfColorSpaceFilterICCBased::GetColorComponentCount() const
 {
     return m_AlternateColorSpace->GetColorComponentCount();
+}
+
+PdfColorSpaceFilterPattern::PdfColorSpaceFilterPattern(PdfColorSpaceInitializer&& underlyingColorSpace)
+{
+    m_UnderlyingColorSpace = underlyingColorSpace.Take(m_colorSpaceExpVar);
+    if (m_UnderlyingColorSpace == nullptr)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "The underlying color space must be not null");
+}
+
+PdfColorSpaceFilterPattern::PdfColorSpaceFilterPattern(PdfColorSpaceFilterPtr&& alternateColorSpace)
+    : m_UnderlyingColorSpace(alternateColorSpace)
+{
+    if (m_UnderlyingColorSpace == nullptr)
+        m_UnderlyingColorSpace = PdfColorSpaceFilterFactory::GetUnkownInstancePtr();
+}
+
+PdfColorSpaceType PdfColorSpaceFilterPattern::GetType() const
+{
+    return PdfColorSpaceType::Pattern;
+}
+
+PdfColorSpacePixelFormat PdfColorSpaceFilterPattern::GetPixelFormat() const
+{
+    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+}
+
+unsigned PdfColorSpaceFilterPattern::GetSourceScanLineSize(unsigned width, unsigned bitsPerComponent) const
+{
+    (void)width;
+    (void)bitsPerComponent;
+    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+}
+
+unsigned PdfColorSpaceFilterPattern::GetScanLineSize(unsigned width, unsigned bitsPerComponent) const
+{
+    (void)width;
+    (void)bitsPerComponent;
+    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+}
+
+void PdfColorSpaceFilterPattern::FetchScanLine(unsigned char* dstScanLine, const unsigned char* srcScanLine, unsigned width, unsigned bitsPerComponent) const
+{
+    (void)dstScanLine;
+    (void)srcScanLine;
+    (void)width;
+    (void)bitsPerComponent;
+    PODOFO_RAISE_ERROR(PdfErrorCode::NotImplemented);
+}
+
+PdfVariant PdfColorSpaceFilterPattern::GetExportObject(PdfIndirectObjectList& objects) const
+{
+    (void)objects;
+    if (m_colorSpaceExpVar.IsNull())
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedFilter, "Unsupported serializing with null color space export object");
+
+    PdfArray arr;
+    arr.Add("Pattern"_n);
+    arr.Add(m_colorSpaceExpVar);
+    return arr;
+}
+
+unsigned char PdfColorSpaceFilterPattern::GetColorComponentCount() const
+{
+    if (m_UnderlyingColorSpace == nullptr)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "Invalid null underlying pattern color space at this stage");
+
+    return m_UnderlyingColorSpace->GetColorComponentCount();
+}
+
+// TODO: pdfjs does some caching of the map based on object reference, we should do it as well
+bool PdfColorSpaceFilterFactory::TryCreateFromObject(const PdfObject& obj, PdfColorSpaceFilterPtr& colorSpace)
+{
+    const PdfArray* arr;
+    PdfColorSpaceType type;
+    if (obj.TryGetArray(arr))
+    {
+        if (arr->GetSize() == 0)
+        {
+            PoDoFo::LogMessage(PdfLogSeverity::Warning, "Invalid color space");
+            return false;
+        }
+
+        const PdfName* name;
+        if (!arr->MustFindAt(0).TryGetName(name) || !PoDoFo::TryConvertTo(*name, type))
+            return false;
+
+        switch (type)
+        {
+            case PdfColorSpaceType::Indexed:
+            {
+                const PdfObjectStream* stream;
+                charbuff lookup;
+                int64_t maxIndex;
+                PdfColorSpaceFilterPtr baseColorSpace;
+                if (arr->GetSize() < 4)
+                    goto InvalidIndexed; // Invalid array entry count
+
+                if (!TryCreateFromObject(arr->MustFindAt(1), baseColorSpace))
+                    goto InvalidIndexed;
+
+                if (!arr->MustFindAt(2).TryGetNumber(maxIndex) || maxIndex < 1 || maxIndex > 255)
+                    goto InvalidIndexed;
+
+                stream = arr->MustFindAt(3).GetStream();
+                if (stream == nullptr)
+                    goto InvalidIndexed;
+
+                lookup = stream->GetCopy();
+                if (lookup.size() < baseColorSpace->GetColorComponentCount() * ((unsigned)maxIndex + 1))
+                    goto InvalidIndexed;        // Table has invalid lookup map size
+
+                colorSpace.reset(new PdfColorSpaceFilterIndexed(std::move(baseColorSpace), (unsigned)maxIndex + 1, std::move(lookup)));
+                return true;
+
+            InvalidIndexed:
+                PoDoFo::LogMessage(PdfLogSeverity::Warning, "Invalid /Indexed color space name");
+                return false;
+            }
+            case PdfColorSpaceType::Separation:
+            {
+                // A /Separation color space is [/Separation name alternateSpace tintTransform]
+                const PdfName* sepName;
+                if (arr->GetSize() < 4 || !arr->MustFindAt(1).TryGetName(sepName))
+                {
+                    PoDoFo::LogMessage(PdfLogSeverity::Warning, "Invalid /Separation color space array");
+                    return false;
+                }
+
+                // HACK: We don't evaluate the tint transform function (the 4th array
+                // entry) nor map to the alternate color space (the 3rd entry). The single
+                // tint component is decoded as an inverted grayscale value (tint 1 -> black).
+                // This is exact for subtractive colorants like /Black mapping to (0,0,0,tint)
+                // in DeviceCMYK and a reasonable approximation for other spot colors
+                colorSpace.reset(new PdfColorSpaceFilterSeparation(sepName->GetString(), PdfColor(0.0)));
+                return true;
+            }
+            default:
+                PoDoFo::LogMessage(PdfLogSeverity::Warning, "Unsupported color space filter {}", name->GetString());
+                return false;
+        }
+    }
+    else
+    {
+        const PdfName* name;
+        if (!obj.TryGetName(name) || !PoDoFo::TryConvertTo(name->GetString(), type))
+            return false;
+
+        switch (type)
+        {
+            case PdfColorSpaceType::DeviceGray:
+            {
+                colorSpace = GetDeviceGrayInstancePtr();
+                return true;
+            }
+            case PdfColorSpaceType::DeviceRGB:
+            {
+                colorSpace = GetDeviceRGBInstancePtr();
+                return true;
+            }
+            case PdfColorSpaceType::DeviceCMYK:
+            {
+                colorSpace = GetDeviceCMYKInstancePtr();
+                return true;
+            }
+            default:
+            {
+                PoDoFo::LogMessage(PdfLogSeverity::Warning, "Unsupported color space filter {}", name->GetString());
+                return false;
+            }
+        }
+    }
+}
+
+PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetTrivialFilterPtr(PdfColorSpaceType type)
+{
+    switch (type)
+    {
+        case PdfColorSpaceType::DeviceRGB:
+            return GetDeviceRGBInstancePtr();
+        case PdfColorSpaceType::DeviceGray:
+            return GetDeviceGrayInstancePtr();
+        case PdfColorSpaceType::DeviceCMYK:
+            return GetDeviceCMYKInstancePtr();
+        default:
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::CannotConvertColor, "The given color space type is not trivial");
+    }
+}
+
+PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetTrivialFilterPtr(PdfColorSpaceType type, PdfName& exportName)
+{
+    switch (type)
+    {
+        case PdfColorSpaceType::DeviceRGB:
+            exportName = "DeviceRGB";
+            return GetDeviceRGBInstancePtr();
+        case PdfColorSpaceType::DeviceGray:
+            exportName = "DeviceGray";
+            return GetDeviceGrayInstancePtr();
+        case PdfColorSpaceType::DeviceCMYK:
+            exportName = "DeviceCMYK";
+            return GetDeviceCMYKInstancePtr();
+        default:
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::CannotConvertColor, "The given color space type is not trivial");
+    }
+}
+
+PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr()
+{
+    return getDeviceGrayInstancePtr();
+}
+
+const PdfColorSpaceFilter& PdfColorSpaceFilterFactory::GetDeviceGrayInstance()
+{
+    return *getDeviceGrayInstancePtr();
+}
+
+PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr()
+{
+    return getDeviceRGBInstancePtr();
+}
+
+const PdfColorSpaceFilter& PdfColorSpaceFilterFactory::GetDeviceRGBInstance()
+{
+    return *getDeviceRGBInstancePtr();
+}
+
+PdfColorSpaceFilterPtr PdfColorSpaceFilterFactory::GetDeviceCMYKInstancePtr()
+{
+    return getDeviceCMYKInstancePtr();
+}
+
+const PdfColorSpaceFilter& PdfColorSpaceFilterFactory::GetDeviceCMYKInstance()
+{
+    return *getDeviceCMYKInstancePtr();
+}
+
+const PdfColorSpaceFilterPtr& PdfColorSpaceFilterFactory::GetUnkownInstancePtr()
+{
+    static PdfColorSpaceFilterPtr s_unknown(new PdfColorSpaceFilterUnkown());
+    return s_unknown;
+}
+
+const PdfColorSpaceFilterPtr& PdfColorSpaceFilterFactory::GetParameterLessPatternInstancePtr()
+{
+    static PdfColorSpaceFilterPtr s_parameterLessPatternInstance(new PdfColorSpaceFilterPattern(nullptr));
+    return s_parameterLessPatternInstance;
+}
+
+const PdfColorSpaceFilterPtr& PdfColorSpaceFilterFactory::getDeviceGrayInstancePtr()
+{
+    static PdfColorSpaceFilterPtr s_deviceGray(new PdfColorSpaceDeviceGray());
+    return s_deviceGray;
+}
+
+const PdfColorSpaceFilterPtr& PdfColorSpaceFilterFactory::getDeviceRGBInstancePtr()
+{
+    static PdfColorSpaceFilterPtr s_deviceRGB(new PdfColorSpaceFilterDeviceRGB());
+    return s_deviceRGB;
+}
+
+const PdfColorSpaceFilterPtr& PdfColorSpaceFilterFactory::getDeviceCMYKInstancePtr()
+{
+    static PdfColorSpaceFilterPtr s_deviceCMYK(new PdfColorSpaceFilterDeviceCMYK());
+    return s_deviceCMYK;
+}
+
+PdfColorSpaceInitializer::PdfColorSpaceInitializer()
+{
+}
+
+PdfColorSpaceInitializer::PdfColorSpaceInitializer(PdfColorSpaceFilterPtr&& filter)
+    : m_Filter(std::move(filter))
+{
+    if (m_Filter == nullptr)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "The input filter must not be nullptr");
+
+    switch (m_Filter->GetType())
+    {
+        case PdfColorSpaceType::DeviceRGB:
+            m_ExpVar = "DeviceRGB"_n;
+            break;
+        case PdfColorSpaceType::DeviceGray:
+            m_ExpVar = "DeviceGray"_n;
+            break;
+        case PdfColorSpaceType::DeviceCMYK:
+            m_ExpVar = "DeviceCMYK"_n;
+            break;
+        default:
+            // Do nothing
+            break;
+    }
+}
+
+PdfColorSpaceInitializer::PdfColorSpaceInitializer(const PdfColorSpace& colorSpace)
+    : m_Filter(colorSpace.GetFilterPtr()), m_ExpVar(colorSpace.GetObject().GetIndirectReference())
+{
+}
+
+PdfColorSpaceInitializer::PdfColorSpaceInitializer(PdfColorSpaceType colorSpace)
+{
+    switch (colorSpace)
+    {
+        case PdfColorSpaceType::DeviceRGB:
+            m_Filter = PdfColorSpaceFilterFactory::GetDeviceRGBInstancePtr();
+            m_ExpVar = "DeviceRGB"_n;
+            break;
+        case PdfColorSpaceType::DeviceGray:
+            m_Filter = PdfColorSpaceFilterFactory::GetDeviceGrayInstancePtr();
+            m_ExpVar = "DeviceGray"_n;
+            break;
+        case PdfColorSpaceType::DeviceCMYK:
+            m_Filter = PdfColorSpaceFilterFactory::GetDeviceCMYKInstancePtr();
+            m_ExpVar = "DeviceCMYK"_n;
+            break;
+        default:
+            PODOFO_RAISE_ERROR(PdfErrorCode::InvalidEnumValue);
+    }
+}
+
+PdfVariant PdfColorSpaceInitializer::GetExportObject(PdfIndirectObjectList& objects) const
+{
+    PODOFO_ASSERT(m_Filter != nullptr);
+    if (m_ExpVar.IsNull())
+        return m_Filter->GetExportObject(objects);
+    else
+        return m_ExpVar;
+}
+
+bool PdfColorSpaceInitializer::IsNull() const
+{
+    return m_Filter == nullptr;
+}
+
+const PdfColorSpaceFilter& PdfColorSpaceInitializer::GetFilter() const
+{
+    if (m_Filter == nullptr)
+        return *PdfColorSpaceFilterFactory::GetUnkownInstancePtr();
+    else
+        return *m_Filter;
+}
+
+PdfColorSpaceFilterPtr PdfColorSpaceInitializer::Take(PdfVariant& expObj)
+{
+    expObj = std::move(m_ExpVar);
+    return std::move(m_Filter);
 }

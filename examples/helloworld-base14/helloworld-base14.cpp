@@ -1,9 +1,5 @@
-/**
- * Copyright (C) 2006 by Dominik Seichter <domseichter@web.de>
- *
- * Licensed under GNU General Public License 2.0 or later.
- * Some rights reserved. See COPYING, AUTHORS.
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-License-Identifier: MIT-0
 
 // Include the standard headers for cout to write
 // some output to the console.
@@ -91,7 +87,7 @@ void HelloWorld(const string_view& filename)
         // You could set a different color than black to draw
         // the text.
         // 
-        // painter.SetColor(1.0, 0.0, 0.0);
+        // painter.GraphicsState.SetNonStrokingColor(PdfColor(1.0, 0.0, 0.0));
 
         // Actually draw the line "Hello World!" on to the PdfPage at
         // the position 2cm,2cm from the top left corner.
@@ -205,8 +201,8 @@ const char* GetBase14FontName(unsigned i)
 void DrawRedFrame(PdfPainter& painter, double x, double y, double width, double height)
 {
     // draw red box
-    painter.GraphicsState.SetFillColor(PdfColor(1.0f, 0.0f, 0.0f));
-    painter.GraphicsState.SetStrokeColor(PdfColor(1.0f, 0.0f, 0.0f));
+    painter.GraphicsState.SetNonStrokingColor(PdfColor(1.0f, 0.0f, 0.0f));
+    painter.GraphicsState.SetStrokingColor(PdfColor(1.0f, 0.0f, 0.0f));
     painter.DrawLine(x, y, x + width, y);
     if (height > 0.0f)
     {
@@ -215,8 +211,8 @@ void DrawRedFrame(PdfPainter& painter, double x, double y, double width, double 
         painter.DrawLine(x, y + height, x + width, y + height);
     }
     // restore to black
-    painter.GraphicsState.SetFillColor(PdfColor(0.0f, 0.0f, 0.0f));
-    painter.GraphicsState.SetStrokeColor(PdfColor(0.0f, 0.0f, 0.0f));
+    painter.GraphicsState.SetNonStrokingColor(PdfColor(0.0f, 0.0f, 0.0f));
+    painter.GraphicsState.SetStrokingColor(PdfColor(0.0f, 0.0f, 0.0f));
 }
 
 void DemoBase14Fonts(PdfPainter& painter, PdfPage& page, PdfDocument& document)

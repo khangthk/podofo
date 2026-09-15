@@ -1,13 +1,13 @@
-/**
- * SPDX-FileCopyrightText: (C) 2010 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2010 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfIdentityEncoding.h"
 
 #include <utf8cpp/utf8.h>
+
+#include <podofo/private/PdfEncodingPrivate.h>
 
 #include "PdfDictionary.h"
 #include "PdfFont.h"
@@ -17,25 +17,24 @@ using namespace PoDoFo;
 
 static PdfEncodingLimits getLimits(unsigned char codeSpaceSize);
 
-PdfIdentityEncoding::PdfIdentityEncoding(unsigned char codeSpaceSize)
-    : PdfIdentityEncoding(PdfEncodingMapType::Indeterminate,
-        getLimits(codeSpaceSize), PdfIdentityOrientation::Unkwnown) { }
-
-// PdfIdentityEncoding represents either Identity-H/Identity-V
-// predefined CMap names
-PdfIdentityEncoding::PdfIdentityEncoding(PdfEncodingMapType type,
-        const PdfEncodingLimits& limits, PdfIdentityOrientation orientation) :
-    PdfEncodingMap(type),
-    m_Limits(limits),
-    m_orientation(orientation)
-{
-}
+PdfIdentityEncoding::PdfIdentityEncoding(PdfEncodingMapType type, unsigned char codeSpaceSize)
+    : PdfIdentityEncoding(type, getLimits(codeSpaceSize), PdfIdentityOrientation::Unknown) { }
 
 PdfIdentityEncoding::PdfIdentityEncoding(PdfIdentityOrientation orientation)
     : PdfIdentityEncoding(PdfEncodingMapType::CMap, getLimits(2), orientation)
 {
-    if (orientation == PdfIdentityOrientation::Unkwnown)
+    if (orientation == PdfIdentityOrientation::Unknown)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidEnumValue, "Unsupported orientation");
+}
+
+// PdfIdentityEncoding represents either Identity-H/Identity-V
+// predefined CMap names
+PdfIdentityEncoding::PdfIdentityEncoding(PdfEncodingMapType type,
+    const PdfEncodingLimits& limits, PdfIdentityOrientation orientation) :
+    PdfEncodingMap(type),
+    m_Limits(limits),
+    m_orientation(orientation)
+{
 }
 
 bool PdfIdentityEncoding::tryGetCharCode(char32_t codePoint, PdfCharCode& codeUnit) const
@@ -51,10 +50,10 @@ bool PdfIdentityEncoding::tryGetCharCode(char32_t codePoint, PdfCharCode& codeUn
     return true;
 }
 
-bool PdfIdentityEncoding::tryGetCodePoints(const PdfCharCode& codeUnit, const unsigned* cidId, vector<char32_t>& codePoints) const
+bool PdfIdentityEncoding::tryGetCodePoints(const PdfCharCode& codeUnit, const unsigned* cidId, CodePointSpan& codePoints) const
 {
     (void)cidId;
-    codePoints.push_back((char32_t)codeUnit.Code);
+    codePoints = CodePointSpan((codepoint)codeUnit.Code);
     return true;
 }
 
@@ -97,8 +96,9 @@ void PdfIdentityEncoding::AppendCIDMappingEntries(OutputStream& stream, const Pd
     stream.Write("\nendcidrange\n");
 }
 
-void PdfIdentityEncoding::AppendToUnicodeEntries(OutputStream& stream, charbuff& temp) const
+void PdfIdentityEncoding::AppendToUnicodeEntries(OutputStream& stream, const PdfFont& font, charbuff& temp) const
 {
+    (void)font;
     // Just do a single bfrange
     // Use PdfEncodingMap::AppendUTF16CodeTo
 
@@ -110,7 +110,7 @@ void PdfIdentityEncoding::AppendToUnicodeEntries(OutputStream& stream, charbuff&
     m_Limits.LastChar.WriteHexTo(temp);
     stream.Write(temp);
     stream.Write(" ");
-    PdfEncodingMap::AppendUTF16CodeTo(stream, m_Limits.FirstChar.Code, u16temp);
+    PoDoFo::AppendUTF16CodeTo(stream, m_Limits.FirstChar.Code, u16temp);
     stream.Write("\nendbfrange\n");
 }
 
@@ -137,5 +137,5 @@ PdfEncodingLimits getLimits(unsigned char codeSpaceSize)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::ValueOutOfRange, "Code space size can't be zero or bigger than 4");
 
     return { codeSpaceSize, codeSpaceSize, PdfCharCode(0, codeSpaceSize),
-        PdfCharCode((unsigned)std::pow(2, codeSpaceSize * CHAR_BIT), codeSpaceSize) };
+        PdfCharCode((unsigned)std::pow(2, codeSpaceSize * CHAR_BIT) - 1, codeSpaceSize) };
 }

@@ -1,21 +1,39 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfCharCodeMap.h"
 #include <random>
 #include <algorithm>
-#include <utf8cpp/utf8.h>
+
+#include <podofo/private/PdfEncodingPrivate.h>
 
 using namespace std;
 using namespace PoDoFo;
 
-static void appendRangesTo(vector<pair<PdfCharCode, vector<codepoint>>>& mapppings, const CodeUnitMap& mappings, const CodeUnitRanges ranges);
+namespace
+{
+    /// <summary>
+    /// A temporary structure used to compute CodeSpaceRange(s)
+    /// </summary>
+    struct MappingRange
+    {
+        PdfCharCode SrcCodeLo;
+        unsigned Size;
+
+        MappingRange(PdfCharCode srcCodeLo, unsigned size);
+
+        PdfCharCode GetSrcCodeHi() const;
+
+        bool operator<(const MappingRange& rhs) const;
+    };
+}
+
+static void appendRangesTo(vector<pair<PdfCharCode, CodePointSpan>>& mapppings, const CodeUnitMap& mappings, const CodeUnitRanges ranges);
 static void fetchCodePoints(vector<codepoint>& codePoints, const PdfCharCode& code, const CodeUnitRange& range);
-static void pushCodeRangeSize(vector<unsigned char>& codeRangeSizes, unsigned char codeRangeSize);
+static void fetchCodePoints(CodePointSpan& codePoints, const PdfCharCode& code, const CodeUnitRange& range);
+static void updateCodeSpaceRangeLoHi(unsigned refCodeLo, unsigned refCodeHi, unsigned char codeSpaceSize,
+    unsigned& codeLo, unsigned& codeHi);
 
 PdfCharCodeMap::PdfCharCodeMap()
     : m_MapDirty(false), m_codePointMapHead(nullptr) { }
@@ -27,7 +45,7 @@ PdfCharCodeMap::PdfCharCodeMap(PdfCharCodeMap&& map) noexcept
 
 PdfCharCodeMap::~PdfCharCodeMap()
 {
-    deleteNode(m_codePointMapHead);
+    PoDoFo::DeleteNodeReverseMap(m_codePointMapHead);
 }
 
 PdfCharCodeMap& PdfCharCodeMap::operator=(PdfCharCodeMap&& map) noexcept
@@ -37,7 +55,7 @@ PdfCharCodeMap& PdfCharCodeMap::operator=(PdfCharCodeMap&& map) noexcept
 }
 
 PdfCharCodeMap::PdfCharCodeMap(CodeUnitMap&& mappings, CodeUnitRanges&& ranges, const PdfEncodingLimits& limits)
-    : m_Mappings(std::move(mappings)), m_Ranges(std::move(ranges)), m_Limits(limits), m_MapDirty(true), m_codePointMapHead(nullptr)
+    : m_Limits(limits), m_Mappings(std::move(mappings)), m_Ranges(std::move(ranges)), m_MapDirty(true), m_codePointMapHead(nullptr)
 {
 }
 
@@ -54,7 +72,7 @@ bool PdfCharCodeMap::IsTrivialIdentity() const
     // We look first if we can look just at straight mappings
     if (m_Mappings.size() != 0)
     {
-        // If we also have ranges, then it's definetely not trivial
+        // If we also have ranges, then it's definitely not trivial
         if (m_Ranges.size() != 0)
             return false;
 
@@ -69,8 +87,8 @@ bool PdfCharCodeMap::IsTrivialIdentity() const
         unsigned prev = it->first.Code - 1;
         do
         {
-            if (it->second.size() > 1
-                || it->first.Code != it->second[0]
+            if (it->second.GetSize() > 1
+                || it->first.Code != *it->second
                 || it->first.Code > (prev + 1))
             {
                 return false;
@@ -108,15 +126,55 @@ bool PdfCharCodeMap::IsTrivialIdentity() const
     return false;
 }
 
-vector<unsigned char> PdfCharCodeMap::GetCodeRangeSizes() const
+vector<CodeSpaceRange> PdfCharCodeMap::GetCodeSpaceRanges() const
 {
-    vector<unsigned char> ret;
+    set<MappingRange> ranges;
     for (auto& pair : m_Mappings)
-        pushCodeRangeSize(ret, pair.first.CodeSpaceSize);
+        ranges.emplace(pair.first, 1);
 
     for (auto& range : m_Ranges)
-        pushCodeRangeSize(ret, range.SrcCodeLo.CodeSpaceSize);
+        ranges.emplace(range.SrcCodeLo, range.Size);
 
+    vector<CodeSpaceRange> ret;
+    auto it = ranges.begin();
+    auto end = ranges.end();
+    if (it == end)
+        return ret;
+
+    PdfCharCode prevCodeHi = it->GetSrcCodeHi();
+    while (++it != end)
+    {
+        auto& range = *it;
+        if (range.SrcCodeLo.CodeSpaceSize != prevCodeHi.CodeSpaceSize && range.SrcCodeLo.GetByteCode(0) <= prevCodeHi.GetByteCode(0))
+        {
+            // TODO1 Fix overlapping ranges by splitting existing 2-byte, 3-byte, 4-byte ranges
+            PoDoFo::LogMessage(PdfLogSeverity::Warning, "Overlapping CodeSpaceRange");
+        }
+        prevCodeHi = range.GetSrcCodeHi();
+    }
+
+    // Merge all same code space size ranges
+    it = ranges.begin();
+    end = ranges.end();
+    ret.push_back(CodeSpaceRange{ it->SrcCodeLo.Code, it->GetSrcCodeHi().Code, it->SrcCodeLo.CodeSpaceSize });
+    auto prevCodeSpaceRange = &ret.back();
+    while (++it != end)
+    {
+        auto& range = *it;
+        if (range.SrcCodeLo.CodeSpaceSize == prevCodeSpaceRange->CodeSpaceSize)
+        {
+            updateCodeSpaceRangeLoHi(range.SrcCodeLo.Code, range.GetSrcCodeHi().Code, range.SrcCodeLo.CodeSpaceSize,
+                prevCodeSpaceRange->CodeLo, prevCodeSpaceRange->CodeHi);
+        }
+        else
+        {
+            ret.push_back(CodeSpaceRange{ range.SrcCodeLo.Code, range.GetSrcCodeHi().Code, range.SrcCodeLo.CodeSpaceSize });
+            prevCodeSpaceRange = &ret.back();
+        }
+    }
+
+    // TODO2: Fix byte1, byte2, byte3 possible overlappings. This
+    // time we can just restrict ranges on subsequent bytes
     return ret;
 }
 
@@ -134,14 +192,13 @@ void PdfCharCodeMap::PushMapping(const PdfCharCode& codeUnit, const codepointvie
     if (codePoints.size() == 0)
         return;
 
-    vector<codepoint> copy(codePoints.begin(), codePoints.end());
-    pushMapping(codeUnit, std::move(copy));
+    pushMapping(codeUnit, codePoints);
 }
 
 void PdfCharCodeMap::PushMapping(const PdfCharCode& codeUnit, codepoint codePoint)
 {
-    vector<codepoint> codePoints = { codePoint };
-    pushMapping(codeUnit, std::move(codePoints));
+    codepointview codePoints = { &codePoint, 1 };
+    pushMapping(codeUnit, codePoints);
 }
 
 void PdfCharCodeMap::PushRange(const PdfCharCode& srcCodeLo, unsigned size, codepoint dstCodeLo)
@@ -161,7 +218,7 @@ void PdfCharCodeMap::PushRange(const PdfCharCode& srcCodeLo, unsigned rangeSize,
         return;
     }
 
-    auto inserted = m_Ranges.emplace(CodeUnitRange{ srcCodeLo, rangeSize, vector<codepoint>(dstCodeLo.begin(), dstCodeLo.end()) });
+    auto inserted = m_Ranges.emplace(srcCodeLo, rangeSize, CodePointSpan(dstCodeLo));
     // Try fix invalid ranges: the inserted range
     // always overrides previous ones
     bool invalidRanges = false;
@@ -187,16 +244,26 @@ void PdfCharCodeMap::PushRange(const PdfCharCode& srcCodeLo, unsigned rangeSize,
     }
     else
     {
-        auto it = inserted.first;
-        if (it->Size < rangeSize)
+        if (inserted.first->Size < rangeSize)
         {
+            // Prepare a hint for re-insertion
+            auto it = inserted.first;
+            bool atBegin = (it == m_Ranges.begin());
+            if (!atBegin)
+                it = std::prev(it);
             // If the current range with same srcCodeLo has a
             // size lesser than the one being inserted update it
             invalidRanges = true;
-            auto node = m_Ranges.extract(it);
+            auto node = m_Ranges.extract(inserted.first);
             node.value().Size = rangeSize;
-            m_Ranges.insert(inserted.first, std::move(node));
-            (void)tryFixNextRanges(inserted.first, srcCodeLo.Code + rangeSize);
+            // NOTE: The second atBegin evaluation is needed because
+            // the iterator can be invalidated after the extraction
+            // when the node being updated is the first element
+            if (atBegin)
+                it = m_Ranges.insert(m_Ranges.begin(), std::move(node));
+            else
+                it = m_Ranges.insert(it, std::move(node));
+            (void)tryFixNextRanges(it, srcCodeLo.Code + rangeSize);
         }
     }
 
@@ -213,9 +280,9 @@ void PdfCharCodeMap::PushRange(const PdfCharCode& srcCodeLo, unsigned rangeSize,
     m_MapDirty = true;
 }
 
-bool PdfCharCodeMap::TryGetCodePoints(const PdfCharCode& codeUnit, vector<codepoint>& codePoints) const
+bool PdfCharCodeMap::TryGetCodePoints(const PdfCharCode& codeUnit, CodePointSpan& codePoints) const
 {
-    // Try to find direct mapppings first
+    // Try to find direct mappings first
     auto found = m_Mappings.find(codeUnit);
     if (found != m_Mappings.end())
     {
@@ -229,7 +296,7 @@ bool PdfCharCodeMap::TryGetCodePoints(const PdfCharCode& codeUnit, vector<codepo
     auto foundRange = m_Ranges.upper_bound(codeUnit);
     if (foundRange == m_Ranges.begin() || codeUnit.Code >= ((--foundRange)->SrcCodeLo.Code + foundRange->Size))
     {
-        codePoints.clear();
+        codePoints = { };
         return false;
     }
 
@@ -240,123 +307,31 @@ bool PdfCharCodeMap::TryGetCodePoints(const PdfCharCode& codeUnit, vector<codepo
 bool PdfCharCodeMap::TryGetNextCharCode(string_view::iterator& it, const string_view::iterator& end, PdfCharCode& code) const
 {
     const_cast<PdfCharCodeMap&>(*this).reviseCodePointMap();
-    return tryFindNextCharacterId(m_codePointMapHead, it, end, code);
+    return PoDoFo::TryGetCodeReverseMap(m_codePointMapHead, it, end, code);
 }
 
-bool PdfCharCodeMap::TryGetCharCode(const codepointview& codePoints, PdfCharCode& codeUnit) const
+bool PdfCharCodeMap::TryGetCharCode(const codepointview& codePoints, PdfCharCode& code) const
 {
     const_cast<PdfCharCodeMap&>(*this).reviseCodePointMap();
-    auto it = codePoints.begin();
-    auto end = codePoints.end();
-    const CodePointMapNode* node = m_codePointMapHead;
-    if (it == end)
-        goto NotFound;
-
-    while (true)
-    {
-        // All the sequence must match
-        node = findNode(node, *it);
-        if (node == nullptr)
-            goto NotFound;
-
-        it++;
-        if (it == end)
-            break;
-
-        node = node->Ligatures;
-    }
-
-    if (node->CodeUnit.CodeSpaceSize == 0)
-    {
-        // Undefined char code
-        goto NotFound;
-    }
-    else
-    {
-        codeUnit = node->CodeUnit;
-        return true;
-    }
-
-NotFound:
-    codeUnit = { };
-    return false;
+    return PoDoFo::TryGetCodeReverseMap(m_codePointMapHead, codePoints, code);
 }
 
 bool PdfCharCodeMap::TryGetCharCode(codepoint codePoint, PdfCharCode& code) const
 {
     const_cast<PdfCharCodeMap&>(*this).reviseCodePointMap();
-    auto node = findNode(m_codePointMapHead, codePoint);
-    if (node == nullptr)
-    {
-        code = { };
-        return false;
-    }
-
-    code = node->CodeUnit;
-    return true;
+    return PoDoFo::TryGetCodeReverseMap(m_codePointMapHead, codePoint, code);
 }
 
-void PdfCharCodeMap::pushMapping(const PdfCharCode& codeUnit, vector<codepoint>&& codePoints)
+void PdfCharCodeMap::pushMapping(const PdfCharCode& codeUnit, const codepointview& codePoints)
 {
     if (codeUnit.CodeSpaceSize == 0)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "Code unit must be valid");
 
-    m_Mappings[codeUnit] = std::move(codePoints);
+    m_Mappings[codeUnit] = CodePointSpan(codePoints);
 
     // Update limits
     updateLimits(codeUnit);
     m_MapDirty = true;
-}
-
-bool PdfCharCodeMap::tryFindNextCharacterId(const CodePointMapNode* node, string_view::iterator& it,
-    const string_view::iterator& end, PdfCharCode& codeUnit)
-{
-    PODOFO_INVARIANT(it != end);
-    string_view::iterator curr;
-    codepoint codePoint = (codepoint)utf8::next(it, end);
-    node = findNode(node, codePoint);
-    if (node == nullptr)
-        goto NotFound;
-
-    if (it != end)
-    {
-        // Try to find ligatures, save a temporary iterator
-        // in case the search in unsuccessful
-        curr = it;
-        if (tryFindNextCharacterId(node->Ligatures, curr, end, codeUnit))
-        {
-            it = curr;
-            return true;
-        }
-    }
-
-    if (node->CodeUnit.CodeSpaceSize == 0)
-    {
-        // Undefined char code
-        goto NotFound;
-    }
-    else
-    {
-        codeUnit = node->CodeUnit;
-        return true;
-    }
-
-NotFound:
-    codeUnit = { };
-    return false;
-}
-
-const PdfCharCodeMap::CodePointMapNode* PdfCharCodeMap::findNode(const CodePointMapNode* node, codepoint codePoint)
-{
-    if (node == nullptr)
-        return nullptr;
-
-    if (node->CodePoint == codePoint)
-        return node;
-    else if (node->CodePoint > codePoint)
-        return findNode(node->Left, codePoint);
-    else
-        return findNode(node->Right, codePoint);
 }
 
 void PdfCharCodeMap::updateLimits(const PdfCharCode& codeUnit)
@@ -379,11 +354,11 @@ void PdfCharCodeMap::reviseCodePointMap()
 
     if (m_codePointMapHead != nullptr)
     {
-        deleteNode(m_codePointMapHead);
+        PoDoFo::DeleteNodeReverseMap(m_codePointMapHead);
         m_codePointMapHead = nullptr;
     }
 
-    vector<pair<PdfCharCode, vector<codepoint>>> mappings;
+    vector<pair<PdfCharCode, CodePointSpan>> mappings;
     mappings.reserve(m_Mappings.size());
     std::copy(m_Mappings.begin(), m_Mappings.end(), std::back_inserter(mappings));
     appendRangesTo(mappings, m_Mappings, m_Ranges);
@@ -396,26 +371,7 @@ void PdfCharCodeMap::reviseCodePointMap()
     std::shuffle(mappings.begin(), mappings.end(), e);
 
     for (auto& pair : mappings)
-    {
-        CodePointMapNode** curr = &m_codePointMapHead;      // Node root being searched
-        CodePointMapNode* found;                            // Last found node
-        auto it = pair.second.begin();
-        auto end = pair.second.end();
-        PODOFO_INVARIANT(it != end);
-        while (true)
-        {
-            found = findOrAddNode(*curr, *it);
-            it++;
-            if (it == end)
-                break;
-
-            // We add subsequent codepoints to ligatures
-            curr = &found->Ligatures;
-        }
-
-        // Finally set the char code on the last found/added node
-        found->CodeUnit = pair.first;
-    }
+        PoDoFo::PushMappingReverseMap(m_codePointMapHead, pair.second.view(), pair.first);
 
     m_MapDirty = false;
 }
@@ -467,37 +423,9 @@ bool PdfCharCodeMap::tryFixNextRanges(const CodeUnitRanges::iterator& it, unsign
     return hasInvalidRanges;
 }
 
-PdfCharCodeMap::CodePointMapNode* PdfCharCodeMap::findOrAddNode(CodePointMapNode*& node, codepoint codePoint)
-{
-    if (node == nullptr)
-    {
-        node = new CodePointMapNode{ };
-        node->CodePoint = codePoint;
-        return node;
-    }
-
-    if (node->CodePoint == codePoint)
-        return node;
-    else if (node->CodePoint > codePoint)
-        return findOrAddNode(node->Left, codePoint);
-    else
-        return findOrAddNode(node->Right, codePoint);
-}
-
-void PdfCharCodeMap::deleteNode(CodePointMapNode* node)
-{
-    if (node == nullptr)
-        return;
-
-    deleteNode(node->Ligatures);
-    deleteNode(node->Left);
-    deleteNode(node->Right);
-    delete node;
-}
-
 // Append mappings coming from ranges, excluding the ones
 // that are already directly mapped
-void appendRangesTo(vector<pair<PdfCharCode, vector<codepoint>>>& allMapppings,
+void appendRangesTo(vector<pair<PdfCharCode, CodePointSpan>>& allMapppings,
     const CodeUnitMap& mappings, const CodeUnitRanges ranges)
 {
     PdfCharCode code;
@@ -512,7 +440,7 @@ void appendRangesTo(vector<pair<PdfCharCode, vector<codepoint>>>& allMapppings,
                 continue;
 
             fetchCodePoints(codePoints, code, range);
-            allMapppings.push_back({ code, std::move(codePoints) });
+            allMapppings.push_back({ code, CodePointSpan(codePoints) });
         }
     }
 }
@@ -520,26 +448,109 @@ void appendRangesTo(vector<pair<PdfCharCode, vector<codepoint>>>& allMapppings,
 // Fetch codepoints from range for the given code
 void fetchCodePoints(vector<codepoint>& codePoints, const PdfCharCode& code, const CodeUnitRange& range)
 {
-    codePoints = range.DstCodeLo;
+    range.DstCodeLo.CopyTo(codePoints);
     unsigned codeDiff = code.Code - range.SrcCodeLo.Code;
     if (codeDiff > 0)
     {
-        PODOFO_INVARIANT(foundRange->DstCodeLo.size() != 0);
-        auto back = codePoints[codePoints.size() - 1];
-        codePoints[codePoints.size() - 1] = (codepoint)((unsigned)back + codeDiff);
+        PODOFO_INVARIANT(codePoints.size() != 0);
+        auto newcode = (codepoint)((unsigned)codePoints.back() + codeDiff);
+        codePoints[codePoints.size() - 1] = newcode;
     }
 }
 
-void pushCodeRangeSize(vector<unsigned char>& codeRangeSizes, unsigned char codeRangeSize)
+void fetchCodePoints(CodePointSpan& codePoints, const PdfCharCode& code, const CodeUnitRange& range)
 {
-    auto found = std::find(codeRangeSizes.begin(), codeRangeSizes.end(), codeRangeSize);
-    if (found != codeRangeSizes.end())
-        return;
-
-    codeRangeSizes.push_back(codeRangeSize);
+    unsigned codeDiff = code.Code - range.SrcCodeLo.Code;
+    if (codeDiff > 0)
+    {
+        auto dstCodeLo = range.DstCodeLo.view();
+        PODOFO_INVARIANT(dstCodeLo.size() != 0);
+        auto newcode = (codepoint)((unsigned)dstCodeLo.back() + codeDiff);
+        codePoints = CodePointSpan(dstCodeLo.subspan(0, dstCodeLo.size() - 1), newcode);
+    }
+    else
+    {
+        codePoints = range.DstCodeLo;
+    }
 }
+
+CodeUnitRange::CodeUnitRange()
+    : Size(0) { }
+
+CodeUnitRange::CodeUnitRange(PdfCharCode srcCodeLo, unsigned size, CodePointSpan dstCodeLo)
+    : SrcCodeLo(srcCodeLo), Size(size), DstCodeLo(dstCodeLo) { }
 
 PdfCharCode CodeUnitRange::GetSrcCodeHi() const
 {
     return PdfCharCode(SrcCodeLo.Code + Size - 1, SrcCodeLo.CodeSpaceSize);
+}
+
+CodeSpaceRange::CodeSpaceRange()
+    : CodeLo(std::numeric_limits<unsigned>::max()), CodeHi(0), CodeSpaceSize(0) { }
+
+CodeSpaceRange::CodeSpaceRange(unsigned codeLo, unsigned codeHi, unsigned char codeSpaceSize)
+    : CodeLo(codeLo), CodeHi(codeHi), CodeSpaceSize(codeSpaceSize) { }
+
+PdfCharCode CodeSpaceRange::GetSrcCodeLo() const
+{
+    return PdfCharCode(CodeLo, CodeSpaceSize);
+}
+
+PdfCharCode CodeSpaceRange::GetSrcCodeHi() const
+{
+    return PdfCharCode(CodeHi, CodeSpaceSize);
+}
+
+MappingRange::MappingRange(PdfCharCode srcCodeLo, unsigned size)
+    : SrcCodeLo(srcCodeLo), Size(size) { }
+
+PdfCharCode MappingRange::GetSrcCodeHi() const
+{
+    return PdfCharCode(SrcCodeLo.Code + Size - 1);
+}
+
+bool MappingRange::operator<(const MappingRange& rhs) const
+{
+    // Order ranges basing on subsequent bytes of the lower code.
+    // If current code byte is same for both ranges, we analyze
+    // the next one. If all bytes were equal, try to compare
+    // code space sizes
+    unsigned char minCodeSpaceSize = std::min(SrcCodeLo.CodeSpaceSize, rhs.SrcCodeLo.CodeSpaceSize);
+    for (unsigned char i = 0; i < minCodeSpaceSize; i++)
+    {
+        unsigned lhsByteCode = SrcCodeLo.GetByteCode(i);
+        unsigned rhsByteCode = rhs.SrcCodeLo.GetByteCode(i);
+        if (lhsByteCode == rhsByteCode)
+            continue;
+
+        return lhsByteCode < rhsByteCode;
+    }
+
+    return SrcCodeLo.CodeSpaceSize < rhs.SrcCodeLo.CodeSpaceSize;
+}
+
+// Iterate all the bytes of the codes and pick the minimum/maximum of each byte
+void updateCodeSpaceRangeLoHi(unsigned refCodeLo, unsigned refCodeHi, unsigned char codeSpaceSize,
+    unsigned& codeLo, unsigned& codeHi)
+{
+    unsigned currCodeLo = codeLo;
+    unsigned currCodeHi = codeHi;
+    unsigned currByteCode;
+    unsigned refByteCode;
+    unsigned mask;
+    for (unsigned char i = 0; i < codeSpaceSize; i++)
+    {
+        // Create a mask to clear the target byte
+        mask = 0xFF << i * CHAR_BIT;
+
+        currByteCode = (currCodeLo >> i * CHAR_BIT) & 0xFFU;
+        refByteCode = (refCodeLo >> i * CHAR_BIT) & 0xFFU;
+        if (refByteCode < currByteCode)
+            codeLo = (codeLo & ~mask) | (refByteCode << i * CHAR_BIT);
+
+        currByteCode = (currCodeHi >> i * CHAR_BIT) & 0xFFU;
+        refByteCode = (refCodeHi >> i * CHAR_BIT) & 0xFFU;
+        if (refByteCode > currByteCode)
+            codeHi = (codeHi & ~mask) | (refByteCode << i * CHAR_BIT);
+    }
 }

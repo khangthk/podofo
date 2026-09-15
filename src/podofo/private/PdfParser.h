@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2005 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2005 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_PARSER_H
 #define PDF_PARSER_H
@@ -10,6 +8,7 @@
 #include <podofo/main/PdfIndirectObjectList.h>
 #include <podofo/main/PdfTokenizer.h>
 
+#include "PdfObjectStreamParser.h"
 #include "PdfParserObject.h"
 #include "PdfXRefEntry.h"
 
@@ -17,12 +16,18 @@ namespace PoDoFo {
 
 class PdfEncrypt;
 
-/**
- * PdfParser reads a PDF file into memory.
- * The file can be modified in memory and written back using
- * the PdfWriter class.
- * Most PDF features are supported
- */
+/// Bundles the trailer of a parsed document together with its
+/// resolved catalog (the /Root object)
+struct PdfEntryPoints final
+{
+    std::unique_ptr<PdfObject> Trailer;
+    PdfObject& Catalog;
+};
+
+/// PdfParser reads a PDF file into memory.
+/// The file can be modified in memory and written back using
+/// the PdfWriter class.
+/// Most PDF features are supported
 class PdfParser
 {
     friend class PdfParserTest;
@@ -30,272 +35,227 @@ class PdfParser
     friend class PdfWriter;
 
 public:
-    /** Create a new PdfParser object
-     *  You have to open a PDF file using ParseFile later.
-     *  \param objects vector to write the parsed PdfObjects to
-     *
-     *  \see ParseFile
-     */
+    static constexpr int64_t MaxObjectCount = std::numeric_limits<int64_t>::max();
+
+public:
+    /// Create a new PdfParser object
+    /// You have to open a PDF file using ParseFile later.
+    /// @param objects vector to write the parsed PdfObjects to
+    ///
+    /// @see ParseFile
     PdfParser(PdfIndirectObjectList& objects);
 
-    /** Open a PDF file and parse it.
-     *
-     *  \param device the input device to read from
-     *  \param loadOnDemand If true all objects will be read from the file at
-     *                       the time they are accessed first.
-     *                       If false all objects will be read immediately.
-     *                       This is faster if you do not need the complete PDF
-     *                       file in memory.
-     *
-     *
-     *  This might throw a PdfError( PdfErrorCode::InvalidPassword ) exception
-     *  if a password is required to read this PDF.
-     *  Call SetPassword() with the correct password in this case.
-     *
-     *  \see SetPassword
-     */
-    void Parse(InputStreamDevice& device, bool loadOnDemand);
+    /// Open a PDF file and parse it.
+    ///
+    /// @param device the input device to read from
+    ///
+    ///
+    /// This might throw a PdfError( PdfErrorCode::InvalidPassword ) exception
+    /// if a password is required to read this PDF.
+    /// Call SetPassword() with the correct password in this case.
+    ///
+    /// @see SetPassword
+    void Parse(InputStreamDevice& device);
 
     const PdfObject& GetTrailer() const;
 
-    std::unique_ptr<PdfObject> TakeTrailer();
+    /// Take the entry points of the parsed document, transferring
+    /// ownership of the trailer and returning the resolved catalog
+    PdfEntryPoints TakeEntryPoints();
 
-    /**
-     * Try retrieve the previous revision offset of the document before signing
-     * \param currOffset the current offset where to start the search
-     * \param eofOffset the previous revision EOF offset
-     */
+    /// Try retrieve the previous revision offset of the document before signing
+    /// @param currOffset the current offset where to start the search
+    /// @param eofOffset the previous revision EOF offset
     static bool TryGetPreviousRevisionOffset(InputStreamDevice& input, size_t currOffset, size_t& eofOffset);
 
+    /// Checks the magic number at the start of the pdf file
+    static bool TryReadHeader(InputStreamDevice& device, PdfVersion& version);
+
 public:
-    /** If you try to open an encrypted PDF file, which requires
-     *  a password to open, PoDoFo will throw a PdfError( PdfErrorCode::InvalidPassword )
-     *  exception.
-     *
-     *  If you got such an exception, you have to set a password
-     *  which should be used for opening the PDF.
-     *
-     *  The usual way will be to ask the user for the password
-     *  and set the password using this method.
-     *
-     *  PdfParser will immediately continue to read the PDF file.
-     *
-     *  \param password a user or owner password which can be used to open an encrypted PDF file
-     *                   If the password is invalid, a PdfError( PdfErrorCode::InvalidPassword ) exception is thrown!
-     */
+    /// If you try to open an encrypted PDF file, which requires
+    /// a password to open, PoDoFo will throw a PdfError( PdfErrorCode::InvalidPassword )
+    /// exception.
+    ///
+    /// If you got such an exception, you have to set a password
+    /// which should be used for opening the PDF.
+    ///
+    /// The usual way will be to ask the user for the password
+    /// and set the password using this method.
+    ///
+    /// PdfParser will immediately continue to read the PDF file.
+    ///
+    /// @param password a user or owner password which can be used to open an encrypted PDF file
+    ///                   If the password is invalid, a PdfError( PdfErrorCode::InvalidPassword ) exception is thrown!
     inline void SetPassword(const std::string_view& password) { m_Password = password; }
     inline const std::string& GetPassword() { return m_Password; }
 
-    /**
-     * Retrieve the number of incremental updates that
-     * have been applied to the last parsed PDF file.
-     *
-     * 0 means no update has been applied.
-     *
-     * \returns the number of incremental updates to the parsed PDF.
-     */
+    /// Retrieve the number of incremental updates that
+    /// have been applied to the last parsed PDF file.
+    ///
+    /// 0 means no update has been applied.
+    ///
+    /// @returns the number of incremental updates to the parsed PDF.
     inline int GetIncrementalUpdatesCount() const { return m_IncrementalUpdateCount; }
 
-    /** Get a reference to the sorted internal objects vector.
-     *  \returns the internal objects vector.
-     */
+    /// Get a reference to the sorted internal objects vector.
+    /// @returns the internal objects vector.
     inline const PdfIndirectObjectList* GetObjects() const { return m_Objects; }
 
-    /** Get the file format version of the pdf
-     *  \returns the file format version as enum
-     */
+    /// Get the file format version of the pdf
+    /// @returns the file format version as enum
     inline PdfVersion GetPdfVersion() const { return m_PdfVersion; }
 
-    /** \returns true if this PdfParser loads all objects on demand at
-     *                the time they are accessed first.
-     *                The default is to load all object immediately.
-     *                In this case false is returned.
-     */
-    inline bool GetLoadOnDemand() const { return m_LoadOnDemand; }
+    /// @returns true if this PdfParser loads all objects on demand at
+    ///                the time they are accessed first.
+    ///                The default is to load all object immediately.
+    ///                In this case false is returned.
+    inline bool GetLoadStreamsEagerly() const { return m_LoadStreamsEagerly; }
 
-    /** \returns the length of the file
-     */
+    /// @returns the length of the file
     inline size_t GetFileSize() const { return m_FileSize; }
 
-    /**
-     * \returns true if strict parsing mode is enabled
-     *
-     * \see SetStringParsing
-     */
+    /// @returns true if strict parsing mode is enabled
+    ///
+    /// @see SetStringParsing
     inline bool IsStrictParsing() const { return m_StrictParsing; }
 
-    /**
-     * Enable/disable strict parsing mode.
-     * Strict parsing is by default disabled.
-     *
-     * If you enable strict parsing, PoDoFo will fail
-     * on a few more common PDF failures. Please note
-     * that PoDoFo's parser is by default very strict
-     * already and does not recover from e.g. wrong XREF
-     * tables.
-     *
-     * \param strict new setting for strict parsing mode.
-     */
-    inline void SetStrictParsing(bool strict) { m_StrictParsing = strict; }
+    /// Enable/disable strict parsing mode.
+    /// Strict parsing is by default disabled.
+    ///
+    /// If you enable strict parsing, PoDoFo will fail
+    /// on a few more common PDF failures. Please note
+    /// that PoDoFo's parser is by default very strict
+    /// already and does not recover from e.g. wrong XREF
+    /// tables.
+    ///
+    /// @param value new setting for strict parsing mode.
+    void SetStrictParsing(bool value);
 
-    /**
-     * \return if broken objects are ignored while parsing
-     */
-    inline bool GetIgnoreBrokenObjects() const { return m_IgnoreBrokenObjects; }
-
-    /**
-     * Specify if the parser should ignore broken
-     * objects, i.e. XRef entries that do not point
-     * to valid objects.
-     *
-     * Default is to ignore broken objects and
-     * to not throw an exception if one is found.
-     *
-     * \param bBroken if true broken objects will be ignored
-     */
-    inline void SetIgnoreBrokenObjects(bool broken) { m_IgnoreBrokenObjects = broken; }
+    inline void SetSkipXRefRecovery(bool value) { m_SkipXRefRecovery = value; }
 
     inline size_t GetXRefOffset() const { return m_XRefOffset; }
 
     inline bool HasXRefStream() const { return m_HasXRefStream; }
 
-    const PdfEncryptSession* GetEncrypt() const { return m_Encrypt.get(); }
+    inline bool HasCorruptedXRefSections() const { return m_HasCorruptedXRefSections; }
+
+    inline void SetLoadStreamsEagerly(bool value) { m_LoadStreamsEagerly = value; }
+
+    inline const PdfEncryptSession* GetEncrypt() const { return m_Encrypt.get(); }
+
+    inline size_t GetMagicOffset() const { return m_MagicOffset; }
 
 private:
-    /**
-     * Reads the xref sections and the trailers of the file
-     * in the correct order in the memory
-     * \param eofSearchOffset the offset where to start the search for EOF
-     * \param skipFollowPrevious don't follow previous incremental update
-     */
+    /// Reads the xref sections and the trailers of the file
+    /// in the correct order in the memory
+    /// @param eofSearchOffset the offset where to start the search for EOF
+    /// @param skipFollowPrevious don't follow previous incremental update
     void ReadDocumentStructure(InputStreamDevice& device, ssize_t eofSearchOffset = -1, bool skipFollowPrevious = false);
 
-    /**
-     * Reads the xref table from a pdf file.
-     * If there is no xref table, ReadXRefStreamContents() is called.
-     * \param offset read the table from this offset
-     * \param skipFollowPrevious don't follow previous incremental update
-     */
+    /// Reads the xref table from a pdf file, iterating over the whole
+    /// /Prev chain of incremental updates. For each revision, if there is
+    /// no "xref" table, ReadXRefStreamContents() is called instead.
+    /// @param offset read the table from this offset
+    /// @param skipFollowPrevious don't follow previous incremental update
     void ReadXRefContents(InputStreamDevice& device, size_t offset, bool skipFollowPrevious);
 
-    /** Read a xref subsection
-     *
-     *  Throws PdfErrorCode::NoXref if the number of objects read was not
-     *  the number specified by the subsection header (as passed in
-     *  'objectCount').
-     *
-     *  \param firstObject object number of the first object
-     *  \param objectCount  how many objects should be read from this section
-     */
+    /// Read a xref subsection
+    ///
+    /// Throws PdfErrorCode::NoXref if the number of objects read was not
+    /// the number specified by the subsection header (as passed in
+    /// 'objectCount').
+    ///
+    /// @param firstObject object number of the first object
+    /// @param objectCount  how many objects should be read from this section
     void ReadXRefSubsection(InputStreamDevice& device, int64_t& firstObject, int64_t& objectCount);
 
-    /** Reads an XRef stream contents object
-     *  \param offset read the stream from this offset
-     *  \param readOnlyTrailer only the trailer is skipped over, the contents
-     *         of the xref stream are not parsed
-     */
-    void ReadXRefStreamContents(InputStreamDevice& device, size_t offset, bool skipFollowPrevious);
+    /// Reads an XRef stream contents object
+    /// @param offset read the stream from this offset
+    /// @param prevOffset returns the /Prev offset of the stream, if any
+    void ReadXRefStreamContents(InputStreamDevice& device, size_t offset, nullable<size_t>& prevOffset);
 
-    /** Reads all objects from the pdf into memory
-     *  from the previously read entries
-     *
-     *  If required an encryption object is setup first.
-     *
-     *  The actual reading happens in ReadObjectsInternal()
-     *  either if no encryption is required or a correct
-     *  encryption object was initialized from SetPassword.
-     */
-    void ReadObjects(InputStreamDevice& device);
+    /// Reads objects offsets and references into memory
+    void ReadObjectEntries(InputStreamDevice& device);
 
-    /** Checks the magic number at the start of the pdf file
-     *  and sets the m_PdfVersion member to the correct version
-     *  of the pdf file.
-     *
-     *  \returns true if this is a pdf file, otherwise false
-     */
-    bool IsPdfFile(InputStreamDevice& device);
+    /// Resolves the document catalog (the /Root object) from the trailer
+    /// and validates that it contains a /Pages key. Throws otherwise
+    void resolveCatalog();
+
+    /// Reads all objects from the pdf into memory
+    /// from the previously read entries
+    ///
+    /// Requires a correctly setup PdfEncrypt object
+    /// with correct password.
+    ///
+    /// This method is called from ReadObjects
+    /// or SetPassword.
+    ///
+    /// @see ReadObjects
+    /// @see SetPassword
+    void ReadObjectsInternal(InputStreamDevice& device);
+
+    /// Checks the magic number at the start of the pdf file
+    /// and sets the m_PdfVersion member to the correct version
+    /// of the pdf file.
+    void ReadHeader(InputStreamDevice& device);
 
 private:
-    /** Searches backwards from the specified position of the file
-     *  and tries to find a token.
-     *  The current file is positioned right after the token.
-     *
-     *  \param token a token to find
-     *  \param range range in bytes in which to search
-     *                beginning at the specified position of the file
-     *  \param searchEnd specifies position
-     */
-    void findTokenBackward(InputStreamDevice& device, const char* token, size_t range, size_t searchEnd);
+    static bool tryReadHeader(InputStreamDevice& device, size_t& magicOffset, PdfVersion& version);
 
-    /** Merge the information of this trailer object
-     *  in the parsers main trailer object.
-     *  \param trailer take the keys to merge from this dictionary.
-     */
+    bool tryRebuildCrossReference(InputStreamDevice& device);
+
+    /// Searches backwards from the specified position of the file
+    /// and tries to find a token.
+    /// If found, the current stream is positioned right after the token.
+    ///
+    /// @param token a token to find
+    /// @param searchEnd specifies position
+    /// @returns true if the token was found
+    bool tryFindTokenBackward(InputStreamDevice& device, std::string_view token, size_t searchEnd);
+
+    /// Merge the information of this trailer object
+    /// in the parsers main trailer object.
+    /// @param trailer take the keys to merge from this dictionary.
     void mergeTrailer(const PdfObject& trailer);
 
-    /** Looks for a startxref entry at the current file position
-     *  and saves its byteoffset to pXRefOffset.
-     *  \param xRefOffset store the byte offset of the xref section into this variable.
-     */
-    void findXRef(InputStreamDevice& device, size_t& xRefOffset);
+    void eagerlyLoadStreams();
 
-    /** Reads all objects from the pdf into memory
-     *  from the previously read entries
-     *
-     *  Requires a correctly setup PdfEncrypt object
-     *  with correct password.
-     *
-     *  This method is called from ReadObjects
-     *  or SetPassword.
-     *
-     *  \see ReadObjects
-     *  \see SetPassword
-     */
-    void readObjectsInternal(InputStreamDevice& device);
+    /// Push lazily loaded objects for the given entries of the object
+    /// stream objNo on the objects vector
+    ///
+    /// @param objNo object number of the stream object
+    /// @param entries the compressed objects to push
+    void readCompressedObjectsFromStream(uint32_t objNo,
+        const std::vector<PdfObjectStreamParser::Entry>& entries);
 
-    /** Read the object with index from the object stream nObjNo
-     *  and push it on the objects vector
-     *
-     *  All objects are read from this stream and the stream object
-     *  is free'd from memory. Further calls who try to read from the
-     *  same stream simply do nothing.
-     *
-     *  \param objNo object number of the stream object
-     *  \param index index of the object which should be parsed
-     *
-     */
-    void readCompressedObjectFromStream(uint32_t objNo, const cspan<int64_t>& objectList);
-
-    void readNextTrailer(InputStreamDevice& device, bool skipFollowPrevious);
+    void readNextTrailer(InputStreamDevice& device, nullable<size_t>& prevOffset);
 
 
-    /** Checks for the existence of the %%EOF marker at the end of the file.
-     *  When strict mode is off it will also attempt to setup the parser to ignore
-     *  any garbage after the last %%EOF marker.
-     *  Simply raises an error if there is a problem with the marker.
-     *
-     */
+    /// Checks for the existence of the %%EOF marker at the end of the file.
+    /// When strict mode is off it will also attempt to setup the parser to ignore
+    /// any garbage after the last %%EOF marker.
+    /// Simply raises an error if there is a problem with the marker.
+    ///
     void checkEOFMarker(InputStreamDevice& device);
 
-    /** Initializes all private members
-     *  with their initial values.
-     */
-    void reset();
+    void clear();
 
-    /** Small helper method to retrieve the document id from the trailer
-     *
-     *  \returns the document id of this PDF document
-     */
+    /// Initializes all private members
+    /// with their initial values.
+    void init();
+
+    /// Small helper method to retrieve the document id from the trailer
+    ///
+    /// @returns the document id of this PDF document
     const PdfString& getDocumentId();
 
-    /** Determines the correct version of the PDF
-     *  from the document catalog (if available),
-     *  as PDF > 1.4 allows updating the version.
-     *
-     *  If no catalog dictionary is present or no /Version
-     *  key is available, the version from the file header will
-     *  be used.
-     */
+    /// Determines the correct version of the PDF
+    /// from the document catalog (if available),
+    /// as PDF > 1.4 allows updating the version.
+    ///
+    /// If no catalog dictionary is present or no /Version
+    /// key is available, the version from the file header will
+    /// be used.
     void updateDocumentVersion();
 
 private:
@@ -303,24 +263,34 @@ private:
     PdfTokenizer m_tokenizer;
 
     PdfVersion m_PdfVersion;
-    bool m_LoadOnDemand;
-
-    size_t m_magicOffset;
+    bool m_LoadStreamsEagerly;
     bool m_HasXRefStream;
+    bool m_HasCorruptedXRefSections;
+
+    size_t m_MagicOffset;
+    size_t m_StartXRefTokenPos;
     size_t m_XRefOffset;
     size_t m_FileSize;
-    size_t m_lastEOFOffset;
+
+    // Used to backward search for "startxref". It may effectively
+    // be the position of the last %%EOF, but when searching previous
+    // revisions we can't ensure the existing/correctness of such
+    // marker, so this is not guaranteed
+    size_t m_lastEOFOffsetHint;
 
     PdfXRefEntries m_entries;
     PdfIndirectObjectList* m_Objects;
 
     std::unique_ptr<PdfParserObject> m_Trailer;
+    PdfObject* m_Catalog;
     std::shared_ptr<PdfEncryptSession> m_Encrypt;
+    // Reference of the encryption dictionary in the document, if any
+    PdfReference m_encryptRef;
 
     std::string m_Password;
 
     bool m_StrictParsing;
-    bool m_IgnoreBrokenObjects;
+    bool m_SkipXRefRecovery;
 
     unsigned m_IncrementalUpdateCount;
 

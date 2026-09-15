@@ -1,28 +1,35 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2023 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2023 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfImmediateWriter.h"
 
 #include <podofo/main/PdfStatefulEncrypt.h>
 
-#include "PdfXRefStream.h"
+#include "PdfXRef.h"
 #include "PdfStreamedObjectStream.h"
 
 using namespace std;
 using namespace PoDoFo;
 
 PdfImmediateWriter::PdfImmediateWriter(PdfIndirectObjectList& objects, const PdfObject& trailer,
-        OutputStreamDevice& device, PdfVersion version, const shared_ptr<PdfEncrypt>& encrypt, PdfSaveOptions opts) :
-    PdfWriter(objects, trailer),
+        OutputStreamDevice& device, PdfVersion version, shared_ptr<PdfEncrypt> encrypt, PdfSaveOptions opts) :
+    PdfWriter(objects, trailer, 0),
     m_Device(&device),
     m_OpenStream(false)
 {
-    SetPdfVersion(version);
+    SetPdfVersionHint(version);
     SetSaveOptions(opts);
+    InitWriteState();
+
+    if (GetUseXRefStream())
+    {
+        // The XRef stream object would be serialized to the device as soon
+        // as its stream is created, before the trailer keys can be added to it
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedOperation,
+            "Writing an XRef stream is not supported when streaming the document");
+    }
 
     // Register as observer for PdfIndirectObjectList
     GetObjects().AttachObserver(*this);
@@ -36,21 +43,25 @@ PdfImmediateWriter::PdfImmediateWriter(PdfIndirectObjectList& objects, const Pdf
     // Setup encryption
     if (encrypt != nullptr)
     {
-        m_encrypt.reset(new PdfEncryptSession(encrypt));
+        m_encrypt.reset(new PdfEncryptSession(std::move(encrypt)));
         this->SetEncrypt(*m_encrypt);
-        encrypt->EnsureEncryptionInitialized(GetIdentifier(), m_encrypt->GetContext());
+        m_encrypt->GetEncrypt().EnsureEncryptionInitialized(GetIdentifier(), m_encrypt->GetContext());
     }
 
     // Start with writing the header
     this->WritePdfHeader(*m_Device);
 
-    // Manually prepare the cross-reference table/stream
-    m_xRef.reset(GetUseXRefStream() ? new PdfXRefStream(*this) : new PdfXRef(*this));
+    // Manually prepare the cross-reference table
+    m_xRef.reset(new PdfXRef(*this));
 }
 
 PdfImmediateWriter::~PdfImmediateWriter()
 {
     finish();
+    // The object list outlives this writer, so the registrations
+    // it holds would be left dangling
+    GetObjects().DetachObserver();
+    GetObjects().SetStreamFactory(nullptr);
 }
 
 void PdfImmediateWriter::finish()

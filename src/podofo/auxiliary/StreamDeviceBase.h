@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef AUX_STREAM_DEVICE_BASE_H
 #define AUX_STREAM_DEVICE_BASE_H
@@ -33,17 +31,15 @@ protected:
     StreamDeviceBase();
 
 public:
-    /** Seek the device to the position offset from the beginning
-     *  \param offset from the beginning of the file
-     */
+    /// Seek the device to the position offset from the beginning
+    /// @param offset from the beginning of the file
     void Seek(size_t offset);
 
-    /** Seek the device to the position offset from the beginning
-     *  \param offset from the beginning of the file
-     *  \param direction where to start (Begin, Current, End)
-     *
-     *  A non-seekable input device will throw an InvalidDeviceOperation.
-     */
+    /// Seek the device to the position offset from the beginning
+    /// @param offset from the beginning of the file
+    /// @param direction where to start (Begin, Current, End)
+    ///
+    /// A non-seekable input device will throw an InvalidDeviceOperation.
     void Seek(ssize_t offset, SeekDirection direction);
 
     void Close();
@@ -51,21 +47,17 @@ public:
 public:
     DeviceAccess GetAccess() const { return m_Access; }
 
-    /**
-     * \return True if the stream is at EOF
-     */
+    /// @return True if the stream is at EOF
     virtual bool Eof() const = 0;
 
-    /** The number of bytes written to this object.
-     *  \returns the number of bytes written to this object.
-     *
-     *  \see Init
-     */
+    /// The number of bytes written to this object.
+    /// @returns the number of bytes written to this object.
+    ///
+    /// @see Init
     virtual size_t GetLength() const = 0;
 
-    /** Get the current offset from the beginning of the file.
-     *  \return the offset form the beginning of the file.
-     */
+    /// Get the current offset from the beginning of the file.
+    /// @return the offset form the beginning of the file.
     virtual size_t GetPosition() const = 0;
 
     virtual bool CanSeek() const;
@@ -76,6 +68,11 @@ protected:
 
     virtual void seek(ssize_t offset, SeekDirection direction);
     virtual void close();
+
+    /// Commit any buffered position back to the device and drop all buffered
+    /// state, so that seek()/close() and GetPosition() see a consistent,
+    /// unbuffered device. Default no-op
+    virtual void resetBuffers();
 
 private:
     DeviceAccess m_Access;

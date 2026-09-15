@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_XREF_STREAM_H
 #define PDF_XREF_STREAM_H
@@ -12,30 +10,22 @@
 
 namespace PoDoFo {
 
-/**
- * Creates an XRef table that is a stream object.
- * Requires at least PDF 1.5. XRef streams are more
- * compact than normal XRef tables.
- *
- * This is an internal class of PoDoFo used by PdfWriter.
- */
+/// Creates an XRef table that is a stream object.
+/// Requires at least PDF 1.5. XRef streams are more
+/// compact than normal XRef tables.
+///
+/// This is an internal class of PoDoFo used by PdfWriter.
 class PdfXRefStream final : public PdfXRef
 {
-    friend class PdfWriter;
-    friend class PdfImmediateWriter;
-
-private:
-    /** Create a new XRef table
-     *
-     *  \param writer is needed to fill the trailer directory
-     *                 correctly which is included into the XRef
-     *  \param parent a vector of PdfObject is required
-     *                 to create a PdfObject for the XRef
-     */
+public:
+    /// Create a new XRef table
+    ///
+    /// @param writer is needed to fill the trailer directory
+    ///                 correctly which is included into the XRef
     PdfXRefStream(PdfWriter& writer);
 
 public:
-    uint64_t GetOffset() const override;
+    size_t GetOffset() const override;
 
     bool ShouldSkipWrite(const PdfReference& ref) override;
 
@@ -53,17 +43,29 @@ private:
     struct XRefStreamEntry
     {
         uint8_t Type;
-        uint32_t Variant; // Can be an object number or an offset
-        uint16_t Generation;
+        union
+        {
+            uint32_t ObjectNumber;  // Object number in Free and Compressed entries
+            uint32_t Offset;        // Offset of the object in InUse entries
+        };
+        union
+        {
+            uint16_t Generation;    // The generation of the object in Free and InUse entries
+            uint16_t Index;         // Index of the object in the stream for Compressed entries
+        };
     };
 #pragma pack(pop)
+
+    // The entries are written as a raw block and the /W widths are
+    // taken from the members, so there shall be no padding
+    static_assert(sizeof(XRefStreamEntry) == 7, "XRefStreamEntry shall be packed");
 
 private:
     std::vector<XRefStreamEntry> m_rawEntries;
     int m_xrefStreamEntryIndex;
     PdfObject* m_xrefStreamObj;
     PdfArray m_indices;
-    int64_t m_offset;
+    size_t m_offset;
 };
 
 };

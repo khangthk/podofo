@@ -1,10 +1,6 @@
-/**
- * Copyright (C) 2008 by Dominik Seichter <domseichter@web.de>
- * Copyright (C) 2021 by Francesco Pretto <ceztko@gmail.com>
- *
- * Licensed under GNU Library General Public 2.0 or later.
- * Some rights reserved. See COPYING, AUTHORS.
- */
+// SPDX-FileCopyrightText: 2008 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2021 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: MIT-0
 
 #include <PdfTest.h>
 
@@ -22,24 +18,26 @@ namespace PoDoFo
     {
     public:
         static void TestToUnicodeParse();
+        static void TestDifferencesObject();
     };
 }
 
 METHOD_AS_TEST_CASE(PdfEncodingTest::TestToUnicodeParse, "TestToUnicodeParse")
+METHOD_AS_TEST_CASE(PdfEncodingTest::TestDifferencesObject, "TestDifferencesObject")
 
 TEST_CASE("TestDifferences")
 {
-    PdfDifferenceList difference;
+    PdfDifferenceMap difference;
 
     // Newly created encoding should be empty
     REQUIRE(difference.GetCount() == 0);
 
     // Adding 0 should work
-    difference.AddDifference(0, "A");
+    difference.AddDifference(0, u'A');
     REQUIRE(difference.GetCount() == 1);
 
     // Adding 255 should work
-    difference.AddDifference(255, "B");
+    difference.AddDifference(255, u'B');
     REQUIRE(difference.GetCount() == 2);
 
     // Convert to array
@@ -64,7 +62,7 @@ TEST_CASE("TestDifferences")
     expected.Add(static_cast<int64_t>(255));
     expected.Add(PdfName("X"));
 
-    difference.AddDifference(255, "X");
+    difference.AddDifference(255, u'X');
 
     difference.ToArray(data);
 
@@ -87,11 +85,11 @@ TEST_CASE("TestDifferences")
     expected.Add(static_cast<int64_t>(255));
     expected.Add(PdfName("X"));
 
-    difference.AddDifference(1, "B");
-    difference.AddDifference(2, "C");
-    difference.AddDifference(4, "D");
-    difference.AddDifference(5, "E");
-    difference.AddDifference(9, "F");
+    difference.AddDifference(1, u'B');
+    difference.AddDifference(2, u'C');
+    difference.AddDifference(4, u'D');
+    difference.AddDifference(5, u'E');
+    difference.AddDifference(9, u'F');
 
     difference.ToArray(data);
 
@@ -101,32 +99,32 @@ TEST_CASE("TestDifferences")
 
     // Test if contains works correctly
     const PdfName* name;
-    char32_t value;
-    REQUIRE(difference.TryGetMappedName(0, name, value));
+    CodePointSpan codepoints;
+    REQUIRE(difference.TryGetMappedName(0, name, codepoints));
     REQUIRE(*name == "A");
-    REQUIRE(static_cast<int>(value) == 0x41);
+    REQUIRE(static_cast<int>(*codepoints) == 0x41);
 
-    REQUIRE(difference.TryGetMappedName(9, name, value));
+    REQUIRE(difference.TryGetMappedName(9, name, codepoints));
     REQUIRE(*name == "F");
-    REQUIRE(static_cast<int>(value) == 0x46);
+    REQUIRE(static_cast<int>(*codepoints) == 0x46);
 
-    REQUIRE(difference.TryGetMappedName(255, name, value));
+    REQUIRE(difference.TryGetMappedName(255, name, codepoints));
     REQUIRE(*name  == "X");
-    REQUIRE(static_cast<int>(value) == 0x58);
+    REQUIRE(static_cast<int>(*codepoints) == 0x58);
 
-    REQUIRE(!difference.TryGetMappedName(100, name, value));
+    REQUIRE(!difference.TryGetMappedName(100, name, codepoints));
 }
 
-TEST_CASE("TestDifferencesObject")
+void PdfEncodingTest::TestDifferencesObject()
 {
-    PdfDifferenceList difference;
-    difference.AddDifference(1, "B");
-    difference.AddDifference(2, "C");
-    difference.AddDifference(4, "D");
-    difference.AddDifference(5, "E");
-    difference.AddDifference(9, "F");
+    PdfDifferenceMap differences;
+    differences.AddDifference(1, 'B');
+    differences.AddDifference(2, 'C');
+    differences.AddDifference(4, 'D');
+    differences.AddDifference(5, 'E');
+    differences.AddDifference(9, 'F');
 
-    PdfDifferenceEncoding encoding(PdfEncodingMapFactory::MacRomanEncodingInstance(), difference);
+    PdfDifferenceEncoding encoding(PdfEncodingMapFactory::GetMacRomanEncodingInstancePtr(), std::move(differences));
 
     // Check for encoding key
     PdfMemDocument doc;
@@ -161,15 +159,15 @@ TEST_CASE("TestDifferencesObject")
 TEST_CASE("TestDifferencesEncoding")
 {
     // Create a differences encoding where A and B are exchanged
-    PdfDifferenceList difference;
-    difference.AddDifference((unsigned char)'A', "B");
-    difference.AddDifference((unsigned char)'B', "A");
-    difference.AddDifference((unsigned char)'C', "D");
+    PdfDifferenceMap differences;
+    differences.AddDifference((unsigned char)'A', 'B');
+    differences.AddDifference((unsigned char)'B', 'A');
+    differences.AddDifference((unsigned char)'C', 'D');
 
     PdfMemDocument doc;
 
     PdfFontCreateParams params;
-    params.Encoding = PdfEncoding(std::make_shared<PdfDifferenceEncoding>(PdfEncodingMapFactory::WinAnsiEncodingInstance(), difference));
+    params.Encoding = PdfEncoding(std::make_shared<PdfDifferenceEncoding>(PdfEncodingMapFactory::GetWinAnsiEncodingInstancePtr(), std::move(differences)));
     auto& font = doc.GetFonts().GetStandard14Font(PdfStandard14FontType::Helvetica, params);
 
     charbuff encoded;
@@ -179,82 +177,6 @@ TEST_CASE("TestDifferencesEncoding")
     REQUIRE(encoded == "ABBAI");
     auto unicode = params.Encoding.ConvertToUtf8(PdfString::FromRaw(encoded));
     REQUIRE(unicode == "BAABI");
-}
-
-// FIX-ME: This test passes but it's garbage and very slow
-// Fix it the whole thing by handling properly the Adobe Glyph List
-// in PdfDifferenceEncoding (or better a new separate function)
-TEST_CASE("TestUnicodeNames", "[.]")
-{
-    // List of items which are defined twice and cause
-    // other ids to be returned than those which where send in
-    const char* duplicates[] = {
-        "Delta",
-        "fraction",
-        "hyphen",
-        "macron",
-        "mu",
-        "Omega",
-        "periodcentered",
-        "scedilla",
-        "Scedilla",
-        "space",
-        "tcommaaccent",
-        "Tcommaaccent",
-        "exclamsmall",
-        "dollaroldstyle",
-        "zerooldstyle",
-        "oneoldstyle",
-        "twooldstyle",
-        "threeoldstyle",
-        "fouroldstyle",
-        "fiveoldstyle",
-        "sixoldstyle",
-        "sevenoldstyle",
-        "eightoldstyle",
-        "nineoldstyle",
-        "ampersandsmall",
-        "questionsmall",
-        nullptr
-    };
-
-    unsigned duplicatesCount = 0;
-    unsigned codeCount = 0;
-    for (int i = 0; i < 0xFFFF; i++)
-    {
-        PdfName name = PdfDifferenceEncoding::CodePointToName(static_cast<char32_t>(i));
-        char32_t id = PdfDifferenceEncoding::NameToCodePoint(name);
-
-        bool duplicateFound = false;
-        const char** duplicate = duplicates;
-        while (*duplicate != nullptr)
-        {
-            if (name == *duplicate)
-            {
-                duplicateFound = true;
-                break;
-            }
-
-            duplicate++;
-        }
-
-        if (!duplicateFound)
-        {
-            if (static_cast<char32_t>(i) == id)
-                codeCount++;
-        }
-        else
-        {
-            duplicatesCount++;
-        }
-    }
-
-    // FIX-ME: This test is fishy. It's not clear what "codeCount"
-    // means and why (65535 - duplicatesCount) is different than codeCount
-    // Possibly there are more duplicates
-    INFO(utls::Format("Compared codes count: {}", codeCount));
-    INFO(utls::Format("Duplicate codes count: {}", duplicatesCount));
-    REQUIRE(codeCount == 65421);
 }
 
 TEST_CASE("TestGetCharCode")
@@ -267,10 +189,10 @@ TEST_CASE("TestGetCharCode")
     INFO("MacRomanEncoding");
     outofRangeHelper(macRomanEncoding);
 
-    PdfDifferenceList difference;
-    difference.AddDifference((unsigned char)'A', "B");
-    difference.AddDifference((unsigned char)'B', "A");
-    PdfEncoding differenceEncoding(std::make_shared<PdfDifferenceEncoding>(PdfEncodingMapFactory::WinAnsiEncodingInstance(), difference));
+    PdfDifferenceMap differences;
+    differences.AddDifference((unsigned char)'A', 'B');
+    differences.AddDifference((unsigned char)'B', 'A');
+    PdfEncoding differenceEncoding(std::make_shared<PdfDifferenceEncoding>(PdfEncodingMapFactory::GetWinAnsiEncodingInstancePtr(), std::move(differences)));
     outofRangeHelper(differenceEncoding);
 }
 
@@ -323,7 +245,7 @@ void PdfEncodingTest::TestToUnicodeParse()
     auto& toUnicodeObj = doc.GetObjects().CreateDictionaryObject();
     toUnicodeObj.GetOrCreateStream().SetData(toUnicode);
 
-    PdfEncoding encoding(std::make_shared<PdfIdentityEncoding>(2), PdfEncodingMapFactory::ParseCMapEncoding(toUnicodeObj));
+    PdfEncoding encoding(PdfEncodingMapConstPtr(new PdfIdentityEncoding(PdfEncodingMapType::Indeterminate, 2)), PdfEncodingMapFactory::ParseCMapEncoding(toUnicodeObj));
 
     auto utf8str = encoding.ConvertToUtf8(PdfString::FromRaw(encodedStr));
     REQUIRE(utf8str == expected);
@@ -356,7 +278,7 @@ void PdfEncodingTest::TestToUnicodeParse()
             auto& invalidObject = invalidList.CreateDictionaryObject();
             invalidObject.GetOrCreateStream().SetData(bufferview(toUnicodeInvalidTests[i], char_traits<char>::length(toUnicodeInvalidTests[i])));
 
-            PdfEncoding encodingTestInvalid(std::make_shared<PdfIdentityEncoding>(2), PdfEncodingMapFactory::ParseCMapEncoding(invalidObject));
+            PdfEncoding encodingTestInvalid(PdfEncodingMapConstPtr(new PdfIdentityEncoding(PdfEncodingMapType::Indeterminate, 2)), PdfEncodingMapFactory::ParseCMapEncoding(invalidObject));
 
             auto unicodeStringTestInvalid = encodingTestInvalid.ConvertToUtf8(PdfString::FromRaw(encodedStr));
 

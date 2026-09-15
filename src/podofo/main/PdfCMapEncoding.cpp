@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfCMapEncoding.h"
@@ -31,26 +29,26 @@ static void readNextVariantSequence(PdfPostScriptTokenizer& tokenizer, InputStre
 static uint32_t getCodeFromVariant(const PdfVariant& var);
 static uint32_t getCodeFromVariant(const PdfVariant& var, CodeLimits& limits);
 static uint32_t getCodeFromVariant(const PdfVariant& var, CodeLimits& limits, unsigned char& codeSize);
-static vector<char32_t> handleNameMapping(const PdfName& name);
-static vector<char32_t> handleStringMapping(const PdfString& str);
+static void handleNameMapping(const PdfName& name, vector<char32_t>& codePoints);
+static void handleStringMapping(const PdfString& str, vector<char32_t>& codePoints);
 static void pushRangeMapping(PdfCharCodeMap& map, uint32_t srcCodeLo, unsigned rangeSize,
     const cspan<char32_t>& dstCodeLo, unsigned char codeSize);
-static vector<char32_t> handleUtf8String(const string_view& str);
+static void handleUtf8String(const string_view& str, vector<char32_t>& copdePoints);
 static void pushMapping(PdfCharCodeMap& map, uint32_t srcCode, unsigned char codeSize, const std::vector<char32_t>& codePoints);
 static PdfCharCodeMap parseCMapObject(InputStreamDevice& stream, PdfName& name, PdfCIDSystemInfo& info, int& wMode, PdfEncodingLimits& limits);
 
 PdfCMapEncoding::PdfCMapEncoding(PdfCharCodeMap&& map) :
     PdfEncodingMapBase(std::move(map), PdfEncodingMapType::CMap),
-    m_WMode(0),
     m_isPredefined(false),
+    m_WMode(0),
     m_Limits(GetCharMap().GetLimits()) { }
 
 PdfCMapEncoding::PdfCMapEncoding(PdfCharCodeMap&& map, const PdfName& name, const PdfCIDSystemInfo& info, PdfWModeKind wMode) :
     PdfEncodingMapBase(std::move(map), PdfEncodingMapType::CMap),
+    m_isPredefined(false),
     m_Name(name),
     m_CIDSystemInfo(info),
     m_WMode((int)wMode),
-    m_isPredefined(false),
     m_Limits(GetCharMap().GetLimits()) { }
 
 PdfCMapEncoding PdfCMapEncoding::Parse(const string_view& filepath)
@@ -62,10 +60,10 @@ PdfCMapEncoding PdfCMapEncoding::Parse(const string_view& filepath)
 PdfCMapEncoding::PdfCMapEncoding(PdfCharCodeMap&& map, bool isPredefined, const PdfName& name,
         const PdfCIDSystemInfo& info, int wmode, const PdfEncodingLimits& limits) :
     PdfEncodingMapBase(std::move(map), PdfEncodingMapType::CMap),
+    m_isPredefined(isPredefined),
     m_Name(name),
     m_CIDSystemInfo(info),
     m_WMode(wmode),
-    m_isPredefined(isPredefined),
     m_Limits(limits) { }
 
 PdfCMapEncoding PdfCMapEncoding::Parse(InputStreamDevice& device)
@@ -108,7 +106,7 @@ bool PdfEncodingMapFactory::TryParseCMapEncoding(const PdfObject& cmapObj, uniqu
     if (!map.IsEmpty() != 0 && mapLimits.MinCodeSize == mapLimits.MaxCodeSize && map.IsTrivialIdentity())
     {
         encoding.reset(new PdfIdentityEncoding(
-            PdfEncodingMapType::CMap, mapLimits, PdfIdentityOrientation::Unkwnown));
+            PdfEncodingMapType::CMap, mapLimits, PdfIdentityOrientation::Unknown));
         return true;
     }
 
@@ -125,7 +123,7 @@ bool PdfEncodingMapFactory::TryParseCMapEncoding(const PdfObject& cmapObj, uniqu
         if (cidInfoDict->TryFindKeyAs("Ordering", str))
             info.Ordering = *str;
 
-        info.Supplement = (int)cidInfoDict->FindKeyAs<int64_t>("Supplement", 0);
+        info.Supplement = (int)cidInfoDict->FindKeyAsSafe<int64_t>("Supplement", 0);
     }
     if (dict->TryFindKeyAs("CMapName", name))
         cmapName = *name;
@@ -178,7 +176,8 @@ PdfCharCodeMap parseCMapObject(InputStreamDevice& device, PdfName& cmapName,
     // used elsewhere. Assuming the CMap(s) uses only PS Level 1, which
     // doesn't, support << syntax, is a workaround to read these CMap(s)
     // without crashing.
-    PdfPostScriptTokenizer tokenizer(PdfPostScriptLanguageLevel::L1);
+    PdfPostScriptTokenizer tokenizer;
+    tokenizer.SetParameters({ PdfPostScriptLanguageLevel::L1 });
     CodeLimits codeLimits;
     deque<unique_ptr<PdfVariant>> tokens;
     const PdfString* str;
@@ -226,24 +225,26 @@ PdfCharCodeMap parseCMapObject(InputStreamDevice& device, PdfName& cmapName,
                         tokenizer.ReadNextVariant(device, *var);
                         if (srcCodeHi < srcCodeLo)
                         {
-                            PoDoFo::LogMessage(PdfLogSeverity::Warning, "begincidrange: Found range with srcCodeHi {} < srcCodeLo {}", srcCodeHi, srcCodeLo);
+                            PoDoFo::LogMessage(PdfLogSeverity::Warning, "beginbfrange: Found range with srcCodeHi {} < srcCodeLo {}", srcCodeHi, srcCodeLo);
                             continue;
                         }
 
                         unsigned rangeSize = srcCodeHi - srcCodeLo + 1;
                         if (var->IsArray())
                         {
-                            PdfArray& arr = var->GetArray();
-                            for (unsigned i = 0; i < rangeSize; i++)
+                            auto& arr = var->GetArray();
+                            for (unsigned i = 0; i < rangeSize && i < arr.GetSize(); i++)
                             {
                                 auto& dst = arr[i];
                                 if (dst.TryGetString(str) && str->IsHex()) // pp. 475 PdfReference 1.7
                                 {
-                                    pushMapping(ret, srcCodeLo + i, codeSize, handleStringMapping(*str));
+                                    handleStringMapping(*str, mappedCodes);
+                                    pushMapping(ret, srcCodeLo + i, codeSize, mappedCodes);
                                 }
-                                else if (dst.IsName()) // Not mentioned in tecnincal document #5014 but seems safe
+                                else if (dst.IsName()) // Not mentioned in technical document #5014 but seems safe
                                 {
-                                    pushMapping(ret, srcCodeLo + i, codeSize, handleNameMapping(dst.GetName()));
+                                    handleNameMapping(dst.GetName(), mappedCodes);
+                                    pushMapping(ret, srcCodeLo + i, codeSize, mappedCodes);
                                 }
                                 else
                                 {
@@ -255,13 +256,14 @@ PdfCharCodeMap parseCMapObject(InputStreamDevice& device, PdfName& cmapName,
                         else if (var->TryGetString(str) && str->IsHex())
                         {
                             // pp. 474 PdfReference 1.7
-                            auto dstCodeLo = handleStringMapping(*str);
-                            pushRangeMapping(ret, srcCodeLo, rangeSize, dstCodeLo, codeSize);
+                            handleStringMapping(*str, mappedCodes);
+                            pushRangeMapping(ret, srcCodeLo, rangeSize, mappedCodes, codeSize);
                         }
                         else if (var->IsName())
                         {
-                            // As found in tecnincal document #5014
-                            pushRangeMapping(ret, srcCodeLo, rangeSize, handleNameMapping(var->GetName()), codeSize);
+                            // As found in technical document #5014
+                            handleNameMapping(var->GetName(), mappedCodes);
+                            pushRangeMapping(ret, srcCodeLo, rangeSize, mappedCodes, codeSize);
                         }
                         else
                         {
@@ -291,12 +293,12 @@ PdfCharCodeMap parseCMapObject(InputStreamDevice& device, PdfName& cmapName,
                         else if (var->TryGetString(str) && str->IsHex())
                         {
                             // pp. 474 PdfReference 1.7
-                            mappedCodes = handleStringMapping(*str);
+                            handleStringMapping(*str, mappedCodes);
                         }
                         else if (var->IsName())
                         {
                             // As found in tecnincal document #5014
-                            mappedCodes = handleNameMapping(var->GetName());
+                            handleNameMapping(var->GetName(), mappedCodes);
                         }
                         else
                         {
@@ -362,9 +364,18 @@ PdfCharCodeMap parseCMapObject(InputStreamDevice& device, PdfName& cmapName,
 
                     if (tokenizer.TryReadNextVariant(device, *var))
                     {
-                        if (*name == "CMapName" && var->TryGetName(name))
-                            cmapName = *name;
-                        if (*name == "Registry" && var->TryGetString(str))
+                        if (*name == "CMapName")
+                        {
+                            // /CMapName may be a string as well (https://github.com/podofo/podofo/issues/249)
+                            // NOTE: String charset in theory may be  wider than names,
+                            // as a fail-safe strategy let's create the name with an
+                            // unevaluated raw buffer
+                            if (var->TryGetName(name))
+                                cmapName = *name;
+                            else if (var->TryGetString(str))
+                                cmapName = PdfName(charbuff(str->GetString()));
+                        }
+                        else if (*name == "Registry" && var->TryGetString(str))
                             info.Registry = *str;
                         else if (*name == "Ordering" && var->TryGetString(str))
                             info.Ordering = *str;
@@ -406,11 +417,11 @@ PdfCharCodeMap parseCMapObject(InputStreamDevice& device, PdfName& cmapName,
 // beginbfchar and beginbfrange as UTF-16BE, see PdfReference 1.7
 // page 472. NOTE: Before UTF-16BE there was UCS-2 but UTF-16
 // is backward compatible with UCS-2
-vector<char32_t> handleStringMapping(const PdfString& str)
+void handleStringMapping(const PdfString& str, vector<char32_t>& codePoints)
 {
     string utf8;
     utls::ReadUtf16BEString(str.GetRawData(), utf8);
-    return handleUtf8String(utf8);
+    return handleUtf8String(utf8, codePoints);
 }
 
 // codeSize is the number of the octets in the string or the minimum number
@@ -420,6 +431,13 @@ static uint32_t getCodeFromVariant(const PdfVariant& var, unsigned char& codeSiz
     if (var.IsNumber())
     {
         int64_t num = var.GetNumber();
+        if (num < 0)
+        {
+            PoDoFo::LogMessage(PdfLogSeverity::Warning, "CMap: negative number {} used as character code", num);
+            codeSize = 1;
+            return 0;
+        }
+
         uint32_t ret = (uint32_t)num;
         if (num == 0)
         {
@@ -428,11 +446,12 @@ static uint32_t getCodeFromVariant(const PdfVariant& var, unsigned char& codeSiz
         else
         {
             codeSize = 0;
+            uint32_t unum = ret;
             do
             {
                 codeSize++;
-                num >>= 8;
-            } while (num != 0);
+                unum >>= 8;
+            } while (unum != 0);
         }
 
         return ret;
@@ -442,10 +461,14 @@ static uint32_t getCodeFromVariant(const PdfVariant& var, unsigned char& codeSiz
     uint32_t ret = 0;
     auto rawstr = str.GetRawData();
     unsigned len = (unsigned)rawstr.length();
+    // A uint32_t can represent at most 4 bytes; cap to avoid
+    // undefined behavior from shifting by >= 32.
+    if (len > 4)
+        len = 4;
     for (unsigned i = 0; i < len; i++)
     {
         uint8_t code = (uint8_t)rawstr[len - 1 - i];
-        ret += code << i * 8;
+        ret += (uint32_t)code << (i * 8);
     }
 
     codeSize = (unsigned char)len;
@@ -487,20 +510,18 @@ uint32_t getCodeFromVariant(const PdfVariant& var)
     return getCodeFromVariant(var, codeSize);
 }
 
-vector<char32_t> handleNameMapping(const PdfName& name)
+void handleNameMapping(const PdfName& name, vector<char32_t>& copdePoints)
 {
-    return handleUtf8String(name.GetString());
+    return handleUtf8String(name.GetString(), copdePoints);
 }
 
-vector<char32_t> handleUtf8String(const string_view& str)
+void handleUtf8String(const string_view& str, vector<char32_t>& codePoints)
 {
-    vector<char32_t> ret;
+    codePoints.clear();
     auto it = str.begin();
     auto end = str.end();
     while (it != end)
-        ret.push_back(utf8::next(it, end));
-
-    return ret;
+        codePoints.push_back(utf8::next(it, end));
 }
 
 // Read variant from a sequence, unless it's the end of it

@@ -1,10 +1,6 @@
-/**
- * Copyright (C) 2008 by Dominik Seichter <domseichter@web.de>
- * Copyright (C) 2021 by Francesco Pretto <ceztko@gmail.com>
- *
- * Licensed under GNU Library General Public 2.0 or later.
- * Some rights reserved. See COPYING, AUTHORS.
- */
+// SPDX-FileCopyrightText: 2008 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2021 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: MIT-0
 
 #include <utility>
 
@@ -1605,8 +1601,8 @@ TEST_CASE("TestSeparationColor")
 
     PdfPainter painter;
     painter.SetCanvas(page);
-    painter.GraphicsState.SetFillColorSpace(*spotColorSpace);
-    painter.GraphicsState.SetFillColor(PdfColorRaw{ 0.5 });
+    painter.GraphicsState.SetNonStrokingColorSpace(*spotColorSpace);
+    painter.GraphicsState.SetNonStrokingColor(PdfColorRaw{ 0.5 });
     painter.DrawRectangle(Rect(100, 600, 100, 50), PdfPathDrawMode::Fill);
     painter.FinishDrawing();
     doc.Save(TestUtils::GetTestOutputFilePath("TestSeparationColor.pdf"));

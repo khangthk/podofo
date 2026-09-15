@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfCatalog.h"
@@ -108,7 +105,7 @@ PdfPageMode PdfCatalog::GetPageMode() const
         else if (pmName == "UseThumbs")
             thePageMode = PdfPageMode::UseThumbs;
         else if (pmName == "UseOutlines")
-            thePageMode = PdfPageMode::UseBookmarks;
+            thePageMode = PdfPageMode::UseOutlines;
         else if (pmName == "FullScreen")
             thePageMode = PdfPageMode::FullScreen;
         else if (pmName == "UseOC")
@@ -122,14 +119,16 @@ PdfPageMode PdfCatalog::GetPageMode() const
     return thePageMode;
 }
 
-void PdfCatalog::SetPageMode(PdfPageMode inMode)
+void PdfCatalog::SetPageMode(nullable<PdfPageMode> mode)
 {
-    switch (inMode) {
-        default:
-        case PdfPageMode::DontCare:
-            // this value means leave it alone!
-            break;
+    if (mode == nullptr)
+    {
+        GetDictionary().RemoveKey("PageMode");
+        return;
+    }
 
+    switch (*mode)
+    {
         case PdfPageMode::UseNone:
             GetDictionary().AddKey("PageMode"_n, "UseNone"_n);
             break;
@@ -138,7 +137,7 @@ void PdfCatalog::SetPageMode(PdfPageMode inMode)
             GetDictionary().AddKey("PageMode"_n, "UseThumbs"_n);
             break;
 
-        case PdfPageMode::UseBookmarks:
+        case PdfPageMode::UseOutlines:
             GetDictionary().AddKey("PageMode"_n, "UseOutlines"_n);
             break;
 
@@ -153,17 +152,15 @@ void PdfCatalog::SetPageMode(PdfPageMode inMode)
         case PdfPageMode::UseAttachments:
             GetDictionary().AddKey("PageMode"_n, "UseAttachments"_n);
             break;
+        default:
+            PODOFO_RAISE_ERROR(PdfErrorCode::InvalidEnumValue);
     }
 }
 
 void PdfCatalog::SetUseFullScreen()
 {
-    // first, we get the current mode
-    PdfPageMode	curMode = GetPageMode();
-
     // if current mode is anything but "don't care", we need to move that to non-full-screen
-    if (curMode != PdfPageMode::DontCare)
-        setViewerPreference("NonFullScreenPageMode"_n, PdfObject(GetDictionary().MustFindKey("PageMode")));
+    setViewerPreference("NonFullScreenPageMode"_n, PdfObject(GetDictionary().MustFindKey("PageMode")));
 
     SetPageMode(PdfPageMode::FullScreen);
 }
@@ -242,16 +239,16 @@ void PdfCatalog::SetBindingDirection(const PdfName& direction)
     setViewerPreference("Direction"_n, direction);
 }
 
-void PdfCatalog::SetPageLayout(PdfPageLayout layout)
+void PdfCatalog::SetPageLayout(nullable<PdfPageLayout> layout)
 {
-    switch (layout)
+    if (layout == nullptr)
     {
-        default:
-        case PdfPageLayout::Ignore:
-            break;	// means do nothing
-        case PdfPageLayout::Default:
-            GetDictionary().RemoveKey("PageLayout");
-            break;
+        GetDictionary().RemoveKey("PageLayout");
+        return;
+    }
+
+    switch (*layout)
+    {
         case PdfPageLayout::SinglePage:
             GetDictionary().AddKey("PageLayout"_n, "SinglePage"_n);
             break;
@@ -270,5 +267,7 @@ void PdfCatalog::SetPageLayout(PdfPageLayout layout)
         case PdfPageLayout::TwoPageRight:
             GetDictionary().AddKey("PageLayout"_n, "TwoPageRight"_n);
             break;
+        default:
+            PODOFO_RAISE_ERROR(PdfErrorCode::InvalidEnumValue);
     }
 }

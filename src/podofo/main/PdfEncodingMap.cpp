@@ -1,13 +1,13 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfEncodingMap.h"
 
 #include <utf8cpp/utf8.h>
+
+#include <podofo/private/PdfEncodingPrivate.h>
 
 #include "PdfDictionary.h"
 #include "PdfCMapEncoding.h"
@@ -16,13 +16,17 @@
 using namespace std;
 using namespace PoDoFo;
 
-static void writeCIDMapping(OutputStream& stream, const PdfCharCode& unit, unsigned cid, charbuff& temp);
-static void writeCIDRange(OutputStream& stream, const PdfCharCode& srcCodeLo, const PdfCharCode& srcCodeHi, unsigned cidLo, charbuff& temp);
-
 PdfEncodingMap::PdfEncodingMap(PdfEncodingMapType type)
     : m_Type(type) { }
 
 PdfEncodingMap::~PdfEncodingMap() { }
+
+PdfCIDToGIDMapConstPtr PdfEncodingMap::GetIntrinsicCIDToGIDMap(const PdfDictionary& fontDict, const PdfFontMetrics& metrics) const
+{
+    (void)fontDict;
+    (void)metrics;
+    return nullptr;
+}
 
 bool PdfEncodingMap::TryGetExportObject(PdfIndirectObjectList& objects, PdfName& name, PdfObject*& obj) const
 {
@@ -115,9 +119,9 @@ bool PdfEncodingMap::TryGetNextCID(string_view::iterator& it,
 {
     if (GetType() == PdfEncodingMapType::CMap)
     {
-        vector<char32_t> codePoints;
+        CodePointSpan codePoints;
         bool success = tryGetNextCodePoints(it, end, cid.Unit, codePoints);
-        if (!success || codePoints.size() != 1)
+        if (!success || codePoints.GetSize() != 1)
         {
             // Return false on missing lookup or malformed multiple code points found
             cid = { };
@@ -125,7 +129,7 @@ bool PdfEncodingMap::TryGetNextCID(string_view::iterator& it,
         }
 
         // char32_t is also unsigned
-        cid.Id = (unsigned)codePoints[0];
+        cid.Id = (unsigned)*codePoints;
         return true;
     }
     else
@@ -162,9 +166,8 @@ bool PdfEncodingMap::TryGetNextCID(string_view::iterator& it,
 }
 
 bool PdfEncodingMap::TryGetNextCodePoints(string_view::iterator& it,
-    const string_view::iterator& end, vector<char32_t>& codePoints) const
+    const string_view::iterator& end, CodePointSpan& codePoints) const
 {
-    codePoints.clear();
     PdfCharCode code;
     return tryGetNextCodePoints(it, end, code, codePoints);
 }
@@ -173,27 +176,25 @@ bool PdfEncodingMap::TryGetCIDId(const PdfCharCode& codeUnit, unsigned& cid) con
 {
     // NOTE: Here we assume the map will actually
     // contains cids, and not unicode codepoints
-    vector<char32_t> cids;
+    CodePointSpan cids;
     bool success = tryGetCodePoints(codeUnit, nullptr, cids);
-    if (!success || cids.size() != 1)
+    if (!success || cids.GetSize() != 1)
     {
         // Return false on missing lookup or malformed multiple code points found
         return false;
     }
 
-    cid = (unsigned)cids[0];
+    cid = (unsigned)*cids;
     return true;
 }
 
-bool PdfEncodingMap::TryGetCodePoints(const PdfCharCode& codeUnit, vector<char32_t>& codePoints) const
+bool PdfEncodingMap::TryGetCodePoints(const PdfCharCode& codeUnit, CodePointSpan& codePoints) const
 {
-    codePoints.clear();
     return tryGetCodePoints(codeUnit, nullptr, codePoints);
 }
 
-bool PdfEncodingMap::TryGetCodePoints(const PdfCID& cid, vector<char32_t>& codePoints) const
+bool PdfEncodingMap::TryGetCodePoints(const PdfCID& cid, CodePointSpan& codePoints) const
 {
-    codePoints.clear();
     return tryGetCodePoints(cid.Unit, &cid.Id, codePoints);
 }
 
@@ -219,7 +220,7 @@ PdfWModeKind PdfEncodingMap::GetWModeSafe() const
 
 // NOTE: Don't clear the result on failure. It is done externally
 bool PdfEncodingMap::tryGetNextCodePoints(string_view::iterator& it, const string_view::iterator& end,
-    PdfCharCode& codeUnit, vector<char32_t>& codePoints) const
+    PdfCharCode& codeUnit, CodePointSpan& codePoints) const
 {
     // Save current iterator in the case the search is unsuccessful
     string_view::iterator curr = it;
@@ -256,39 +257,6 @@ bool PdfEncodingMap::tryGetNextCodePoints(string_view::iterator& it, const strin
     return false;
 }
 
-void PdfEncodingMap::AppendUTF16CodeTo(OutputStream& stream, char32_t codePoint, u16string& u16tmp)
-{
-    return AppendUTF16CodeTo(stream, unicodeview(&codePoint, 1), u16tmp);
-}
-
-void PdfEncodingMap::AppendUTF16CodeTo(OutputStream& stream, const unicodeview& codePoints, u16string& u16tmp)
-{
-    char hexbuf[2];
-
-    stream.Write("<");
-    bool first = true;
-    for (unsigned i = 0; i < codePoints.size(); i++)
-    {
-        if (first)
-            first = false;
-        else
-            stream.Write(" "); // Separate each character in the ligatures
-
-        char32_t cp = codePoints[i];
-        utls::WriteUtf16BETo(u16tmp, cp);
-
-        auto data = (const char*)u16tmp.data();
-        size_t size = u16tmp.size() * sizeof(char16_t);
-        for (unsigned l = 0; l < size; l++)
-        {
-            // Append hex codes of the converted utf16 string
-            utls::WriteCharHexTo(hexbuf, data[l]);
-            stream.Write(hexbuf, std::size(hexbuf));
-        }
-    }
-    stream.Write(">");
-}
-
 void PdfEncodingMap::AppendCodeSpaceRange(OutputStream& stream, charbuff& temp) const
 {
     stream.Write("1 begincodespacerange\n");
@@ -305,123 +273,10 @@ PdfEncodingMapBase::PdfEncodingMapBase(PdfCharCodeMap&& map, PdfEncodingMapType 
 {
 }
 
-void PdfEncodingMapBase::AppendCIDMappingEntries(OutputStream& stream, const PdfFont& font, charbuff& temp) const
+PdfEncodingMapBase::PdfEncodingMapBase(shared_ptr<PdfCharCodeMap>&& map, PdfEncodingMapType type)
+    : PdfEncodingMap(type), m_charMap(std::move(map))
 {
-    (void)font;
-    auto& mappings = m_charMap->GetMappings();
-    if (mappings.size() != 0)
-    {
-        utls::FormatTo(temp, mappings.size());
-        stream.Write(temp);
-        stream.Write(" begincidchar\n");
-        for (auto& pair : mappings)
-        {
-            // We assume the cid to be in the single element
-            writeCIDMapping(stream, pair.first, pair.second[0], temp);
-        }
-        stream.Write("endcidchar\n");
-    }
-
-    auto& ranges = m_charMap->GetRanges();
-    if (ranges.size() != 0)
-    {
-        utls::FormatTo(temp, ranges.size());
-        stream.Write(temp);
-        stream.Write(" begincidrange\n");
-        for (auto& range : ranges)
-        {
-            // We assume the cid to be in the single element
-            writeCIDRange(stream, range.SrcCodeLo, range.GetSrcCodeHi(),
-                range.DstCodeLo[0], temp);
-        }
-        stream.Write("endcidrange\n");
-    }
-}
-
-void PdfEncodingMapBase::AppendCodeSpaceRange(OutputStream& stream, charbuff& temp) const
-{
-    auto usedCodeSpaceSizes = m_charMap->GetCodeRangeSizes();
-
-    unsigned size = 0;
-    for (auto& usedCodeSpaceSize : usedCodeSpaceSizes)
-    {
-        vector<utls::FSSUTFRange> ranges = utls::GetFSSUTFRanges(usedCodeSpaceSize);
-        size += (unsigned)ranges.size();
-    }
-
-    stream.Write(std::to_string(size));
-    stream.Write(" begincodespacerange\n");
-
-    bool first = true;
-    for (auto& usedCodeSpaceSize : usedCodeSpaceSizes)
-    {
-        vector<utls::FSSUTFRange> ranges = utls::GetFSSUTFRanges(usedCodeSpaceSize);
-
-        for (auto& range : ranges)
-        {
-            if (first)
-                first = false;
-            else
-                stream.Write("\n");
-
-            PdfCharCode firstCode(range.FirstCode);
-            PdfCharCode lastCode(range.LastCode);
-
-            firstCode.WriteHexTo(temp);
-            stream.Write(temp);
-            lastCode.WriteHexTo(temp);
-            stream.Write(temp);
-        }
-    }
-
-    stream.Write("\nendcodespacerange\n");
-}
-
-void PdfEncodingMapBase::AppendToUnicodeEntries(OutputStream& stream, charbuff& temp) const
-{
-    u16string u16temp;
-
-    auto& mappings = m_charMap->GetMappings();
-    if (mappings.size() != 0)
-    {
-        utls::FormatTo(temp, mappings.size());
-        stream.Write(temp);
-        stream.Write(" beginbfchar\n");
-        for (auto& pair : mappings)
-        {
-            pair.first.WriteHexTo(temp);
-            stream.Write(temp);
-            stream.Write(" ");
-            PdfEncodingMap::AppendUTF16CodeTo(stream, pair.second, u16temp);
-            stream.Write("\n");
-        }
-        stream.Write("endbfchar\n");
-    }
-
-    auto& ranges = m_charMap->GetRanges();
-    if (ranges.size() != 0)
-    {
-        utls::FormatTo(temp, ranges.size());
-        stream.Write(temp);
-        stream.Write(" beginbfrange\n");
-        for (auto& range : ranges)
-        {
-            range.SrcCodeLo.WriteHexTo(temp);
-            stream.Write(temp);
-            range.GetSrcCodeHi().WriteHexTo(temp);
-            stream.Write(temp);
-            stream.Write(" ");
-            PdfEncodingMap::AppendUTF16CodeTo(stream, range.DstCodeLo, u16temp);
-            stream.Write("\n");
-        }
-        stream.Write("endbfrange\n");
-    }
-}
-
-PdfEncodingMapBase::PdfEncodingMapBase(const shared_ptr<PdfCharCodeMap>& map, PdfEncodingMapType type)
-    : PdfEncodingMap(type), m_charMap(map)
-{
-    if (map == nullptr)
+    if (m_charMap == nullptr)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "Map must be not null");
 }
 
@@ -441,10 +296,26 @@ bool PdfEncodingMapBase::tryGetCharCode(char32_t codePoint, PdfCharCode& codeUni
     return m_charMap->TryGetCharCode(codePoint, codeUnit);
 }
 
-bool PdfEncodingMapBase::tryGetCodePoints(const PdfCharCode& code, const unsigned* cidId, vector<char32_t>& codePoints) const
+bool PdfEncodingMapBase::tryGetCodePoints(const PdfCharCode& code, const unsigned* cidId, CodePointSpan& codePoints) const
 {
     (void)cidId;
     return m_charMap->TryGetCodePoints(code, codePoints);
+}
+
+void PdfEncodingMapBase::AppendCodeSpaceRange(OutputStream& stream, charbuff& temp) const
+{
+    PoDoFo::AppendCodeSpaceRangeTo(stream, *m_charMap, temp);
+}
+
+void PdfEncodingMapBase::AppendToUnicodeEntries(OutputStream& stream, const PdfFont& font, charbuff& temp) const
+{
+    PoDoFo::AppendToUnicodeEntriesTo(stream, *m_charMap, font.GetCharCodeSubset().get(), temp);
+}
+
+void PdfEncodingMapBase::AppendCIDMappingEntries(OutputStream& stream, const PdfFont& font, charbuff& temp) const
+{
+    (void)font;
+    PoDoFo::AppendCIDMappingEntriesTo(stream, *m_charMap, temp);
 }
 
 const PdfEncodingLimits& PdfEncodingMapBase::GetLimits() const
@@ -452,47 +323,88 @@ const PdfEncodingLimits& PdfEncodingMapBase::GetLimits() const
     return m_charMap->GetLimits();
 }
 
-PdfEncodingMapOneByte::PdfEncodingMapOneByte(const PdfEncodingLimits& limits)
+PdfEncodingMapSimple::PdfEncodingMapSimple(const PdfEncodingLimits& limits)
     : PdfEncodingMap(PdfEncodingMapType::Simple), m_Limits(limits) { }
 
-void PdfEncodingMapOneByte::AppendToUnicodeEntries(OutputStream& stream, charbuff& temp) const
+void PdfEncodingMapSimple::AppendToUnicodeEntries(OutputStream& stream, const PdfFont& font, charbuff& temp) const
 {
-    auto& limits = GetLimits();
-    PODOFO_ASSERT(limits.MaxCodeSize == 1);
-    vector<char32_t> codePoints;
-    unsigned code = limits.FirstChar.Code;
-    unsigned lastCode = limits.LastChar.Code;
-    stream.Write("1 beginbfrange\n");
-    limits.FirstChar.WriteHexTo(temp);
-    stream.Write(temp);
-    stream.Write(" ");
-    limits.LastChar.WriteHexTo(temp);
-    stream.Write(temp);
-    stream.Write(" [\n");
-    u16string u16tmp;
-    for (; code <= lastCode; code++)
+    CodePointSpan codePoints;
+    auto charCodeSubset = font.GetCharCodeSubset();
+    if (charCodeSubset != nullptr)
     {
-        if (!TryGetCodePoints(PdfCharCode(code), codePoints))
+        struct BFCharMapping
         {
-            // If we don't find the code in the encoding/font
-            // program, it's safe to continue
-            continue;
+            BFCharMapping(const PdfCharCode& code, const CodePointSpan& span)
+                : CharCode(code), CodePoints(span) { }
+
+            PdfCharCode CharCode;
+            CodePointSpan CodePoints;
+        };
+
+        vector<BFCharMapping> mappings;
+        mappings.reserve(charCodeSubset->size());
+        for (auto& charCode : *charCodeSubset)
+        {
+            if (!TryGetCodePoints(charCode, codePoints))
+                continue;
+
+            mappings.emplace_back(charCode, codePoints);
         }
 
-        AppendUTF16CodeTo(stream, codePoints, u16tmp);
-        stream.Write("\n");
+        utls::FormatTo(temp, mappings.size());
+        stream.Write(temp);
+        stream.Write(" beginbfchar\n");
+
+        u16string u16temp;
+        for (auto& mapping : mappings)
+        {
+            mapping.CharCode.WriteHexTo(temp);
+            stream.Write(temp);
+            stream.Write(" ");
+            PoDoFo::AppendUTF16CodeTo(stream, mapping.CodePoints, u16temp);
+            stream.Write("\n");
+        }
+        stream.Write("endbfchar\n");
     }
-    stream.Write("]\n");
-    stream.Write("endbfrange\n");
+    else
+    {
+        auto& limits = GetLimits();
+        PODOFO_ASSERT(limits.MaxCodeSize == 1);
+        unsigned code = limits.FirstChar.Code;
+        unsigned lastCode = limits.LastChar.Code;
+        stream.Write("1 beginbfrange\n");
+        limits.FirstChar.WriteHexTo(temp);
+        stream.Write(temp);
+        stream.Write(" ");
+        limits.LastChar.WriteHexTo(temp);
+        stream.Write(temp);
+        stream.Write(" [\n");
+        u16string u16tmp;
+        for (; code <= lastCode; code++)
+        {
+            if (!TryGetCodePoints(PdfCharCode(code), codePoints))
+            {
+                // If we don't find the code in the encoding/font
+                // just map it to null
+                stream.Write("<0000>\n");
+                continue;
+            }
+
+            PoDoFo::AppendUTF16CodeTo(stream, codePoints, u16tmp);
+            stream.Write("\n");
+        }
+        stream.Write("]\n");
+        stream.Write("endbfrange\n");
+    }
 }
 
-void PdfEncodingMapOneByte::AppendCIDMappingEntries(OutputStream& stream, const PdfFont& font, charbuff& temp) const
+void PdfEncodingMapSimple::AppendCIDMappingEntries(OutputStream& stream, const PdfFont& font, charbuff& temp) const
 {
     auto& limits = GetLimits();
     PODOFO_ASSERT(limits.MaxCodeSize == 1);
     unsigned code = limits.FirstChar.Code;
     unsigned lastCode = limits.LastChar.Code;
-    vector<char32_t> codePoints;
+    CodePointSpan codePoints;
     unsigned gid;
     struct Mapping
     {
@@ -515,7 +427,7 @@ void PdfEncodingMapOneByte::AppendCIDMappingEntries(OutputStream& stream, const 
         // indices within the font program, unless a /CIDToGID map is
         // used. Here, we won't provide one, so we ensure to query
         // for the GID in the font program
-        if (!font.TryGetGID(codePoints[0], PdfGlyphAccess::FontProgram, gid))
+        if (!font.TryGetGID(*codePoints, PdfGlyphAccess::FontProgram, gid))
             continue;
 
         // NOTE: We will map the char code directly to the gid, so
@@ -526,12 +438,12 @@ void PdfEncodingMapOneByte::AppendCIDMappingEntries(OutputStream& stream, const 
     stream.Write(temp);
     stream.Write(" begincidchar\n");
     for (auto& mapping : mappings)
-        writeCIDMapping(stream, mapping.Code, mapping.CID, temp);
+        PoDoFo::WriteCIDMapping(stream, mapping.Code, mapping.CID, temp);
 
     stream.Write("endcidchar\n");
 }
 
-const PdfEncodingLimits& PdfEncodingMapOneByte::GetLimits() const
+const PdfEncodingLimits& PdfEncodingMapSimple::GetLimits() const
 {
     return m_Limits;
 }
@@ -554,7 +466,7 @@ bool PdfNullEncodingMap::tryGetCharCode(char32_t codePoint, PdfCharCode& codeUni
     PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "The null encoding must be bound to a PdfFont");
 }
 
-bool PdfNullEncodingMap::tryGetCodePoints(const PdfCharCode& codeUnit, const unsigned* cidId, vector<char32_t>& codePoints) const
+bool PdfNullEncodingMap::tryGetCodePoints(const PdfCharCode& codeUnit, const unsigned* cidId, CodePointSpan& codePoints) const
 {
     (void)codeUnit;
     (void)codePoints;
@@ -562,9 +474,10 @@ bool PdfNullEncodingMap::tryGetCodePoints(const PdfCharCode& codeUnit, const uns
     PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "The null encoding must be bound to a PdfFont");
 }
 
-void PdfNullEncodingMap::AppendToUnicodeEntries(OutputStream& stream, charbuff& temp) const
+void PdfNullEncodingMap::AppendToUnicodeEntries(OutputStream& stream, const PdfFont& font, charbuff& temp) const
 {
     (void)stream;
+    (void)font;
     (void)temp;
     PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "The null encoding must be bound to a PdfFont");
 }
@@ -578,7 +491,7 @@ void PdfNullEncodingMap::AppendCIDMappingEntries(OutputStream& stream, const Pdf
 }
 
 PdfBuiltInEncoding::PdfBuiltInEncoding(const PdfName& name)
-    : PdfEncodingMapOneByte({ 1, 1, PdfCharCode(0), PdfCharCode(0xFF) }), m_Name(name)
+    : PdfEncodingMapSimple({ 1, 1, PdfCharCode(0), PdfCharCode(0xFF) }), m_Name(name)
 {
 }
 
@@ -632,35 +545,13 @@ bool PdfBuiltInEncoding::tryGetCharCode(char32_t codePoint, PdfCharCode& codeUni
     return true;
 }
 
-bool PdfBuiltInEncoding::tryGetCodePoints(const PdfCharCode& codeUnit, const unsigned* cidId, vector<char32_t>& codePoints) const
+bool PdfBuiltInEncoding::tryGetCodePoints(const PdfCharCode& codeUnit, const unsigned* cidId, CodePointSpan& codePoints) const
 {
     (void)cidId;
     if (codeUnit.Code >= 256)
         return false;
 
     const char32_t* cpUnicodeTable = this->GetToUnicodeTable();
-    codePoints.push_back(cpUnicodeTable[codeUnit.Code]);
+    codePoints = CodePointSpan(cpUnicodeTable[codeUnit.Code]);
     return true;
-}
-
-void writeCIDMapping(OutputStream& stream, const PdfCharCode& unit, unsigned cid, charbuff& temp)
-{
-    unit.WriteHexTo(temp);
-    stream.Write(temp);
-    stream.Write(" ");
-    utls::FormatTo(temp, cid);
-    stream.Write(temp);
-    stream.Write("\n");
-}
-
-void writeCIDRange(OutputStream& stream, const PdfCharCode& srcCodeLo, const PdfCharCode& srcCodeHi, unsigned dstCidLo, charbuff& temp)
-{
-    srcCodeLo.WriteHexTo(temp);
-    stream.Write(temp);
-    srcCodeHi.WriteHexTo(temp);
-    stream.Write(temp);
-    stream.Write(" ");
-    utls::FormatTo(temp, dstCidLo);
-    stream.Write(temp);
-    stream.Write("\n");
 }

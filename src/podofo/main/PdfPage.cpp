@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2005 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2005 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfPage.h"
@@ -18,11 +16,11 @@ using namespace PoDoFo;
 PdfPage::PdfPage(PdfDocument& parent, const Rect& size) :
     PdfDictionaryElement(parent, "Page"_n),
     m_Index(numeric_limits<unsigned>::max()),
-    m_Contents(nullptr),
-    m_Annotations(*this),
-    m_Rotation(-1)
+    m_Rotation(0),
+    m_Resources(new PdfResources(*this)), // A resource dictionary is actually required for pages
+    m_Annotations(*this)
 {
-    initNewPage(size);
+    SetMediaBox(size);
 }
 
 PdfPage::PdfPage(PdfObject& obj)
@@ -33,10 +31,9 @@ PdfPage::PdfPage(PdfObject& obj)
 PdfPage::PdfPage(PdfObject& obj, vector<PdfObject*>&& parents) :
     PdfDictionaryElement(obj),
     m_Index(numeric_limits<unsigned>::max()),
+    m_Rotation(0),
     m_parents(std::move(parents)),
-    m_Contents(nullptr),
-    m_Annotations(*this),
-    m_Rotation(-1)
+    m_Annotations(*this)
 {
     auto contents = GetDictionary().FindKey("Contents");
     if (contents != nullptr)
@@ -45,16 +42,27 @@ PdfPage::PdfPage(PdfObject& obj, vector<PdfObject*>&& parents) :
     auto resources = findInheritableAttribute("Resources");
     if (resources != nullptr)
         m_Resources.reset(new PdfResources(*resources));
+
+    double rotation;
+    if (TryGetRotationRaw(rotation))
+        m_Rotation = utls::NormalizePageRotation(rotation);
+
+    // NOTE: Rotation must be fetched before computing normalized rect
+    m_Rect = GetMediaBox();
 }
 
-Rect PdfPage::GetRect() const
+Corners PdfPage::GetRectRaw() const
 {
-    return this->GetMediaBox();
+    return this->GetMediaBoxRaw();
 }
 
-Rect PdfPage::GetRectRaw() const
+void PdfPage::SetRectRaw(const Corners& rect)
 {
-    return this->GetMediaBox(true);
+    PdfArray mediaBox;
+    rect.ToArray(mediaBox);
+    this->GetDictionary().AddKey("MediaBox"_n, mediaBox);
+    m_Rect = rect.GetNormalized();
+    adjustRectToCurrentRotation(m_Rect);
 }
 
 void PdfPage::SetRect(const Rect& rect)
@@ -62,15 +70,9 @@ void PdfPage::SetRect(const Rect& rect)
     SetMediaBox(rect);
 }
 
-void PdfPage::SetRectRaw(const Rect& rect)
+bool PdfPage::TryGetRotationRadians(double& teta) const
 {
-    SetMediaBox(rect, true);
-}
-
-bool PdfPage::HasRotation(double& teta) const
-{
-    int rotation = GetRotation();
-    if (rotation == 0)
+    if (m_Rotation == 0)
     {
         teta = 0;
         return false;
@@ -78,13 +80,15 @@ bool PdfPage::HasRotation(double& teta) const
 
     // Convert to radians and make it a counterclockwise rotation,
     // as common mathematical notation for rotations
-    teta = -rotation * DEG2RAD;
+    teta = -(m_Rotation * DEG2RAD);
     return true;
 }
 
-void PdfPage::initNewPage(const Rect& size)
+double PdfPage::GetRotationRadians() const
 {
-    SetMediaBox(size);
+    // Convert to radians and make it a counterclockwise rotation,
+    // as common mathematical notation for rotations
+    return -(m_Rotation * DEG2RAD);
 }
 
 void PdfPage::ensureContentsCreated()
@@ -95,14 +99,6 @@ void PdfPage::ensureContentsCreated()
     m_Contents.reset(new PdfContents(*this));
     GetDictionary().AddKey("Contents"_n,
         m_Contents->GetObject().GetIndirectReference());
-}
-
-void PdfPage::ensureResourcesCreated()
-{
-    if (m_Resources != nullptr)
-        return;
-
-    m_Resources.reset(new PdfResources(*this));
 }
 
 PdfObjectStream& PdfPage::GetOrCreateContentsStream(PdfStreamAppendFlags flags)
@@ -188,10 +184,15 @@ Rect PdfPage::CreateStandardPageSize(const PdfPageSize pageSize, bool landscape)
     return rect;
 }
 
-Rect PdfPage::getPageBox(const string_view& inBox, bool isInheritable, bool raw) const
+Rect PdfPage::getPageBox(const string_view& inBox, bool isInheritable) const
 {
-    Rect pageBox;
+    auto ret = Rect::FromCorners(getPageBoxRaw(inBox, isInheritable));
+    adjustRectToCurrentRotation(ret);
+    return ret;
+}
 
+Corners PdfPage::getPageBoxRaw(const string_view& inBox, bool isInheritable) const
+{
     // Take advantage of inherited values - walking up the tree if necessary
     const PdfObject* obj;
     if (isInheritable)
@@ -202,7 +203,7 @@ Rect PdfPage::getPageBox(const string_view& inBox, bool isInheritable, bool raw)
     // assign the value of the box from the array
     if (obj != nullptr && obj->IsArray())
     {
-        pageBox = Rect::FromArray(obj->GetArray());
+        return Corners::FromArray(obj->GetArray());
     }
     else if (inBox == "ArtBox" ||
         inBox == "BleedBox" ||
@@ -210,81 +211,57 @@ Rect PdfPage::getPageBox(const string_view& inBox, bool isInheritable, bool raw)
     {
         // If those page boxes are not specified then
         // default to CropBox per PDF Spec (3.6.2)
-        pageBox = getPageBox("CropBox", true, raw);
+        return getPageBoxRaw("CropBox", true);
     }
     else if (inBox == "CropBox")
     {
         // If crop box is not specified then
         // default to MediaBox per PDF Spec (3.6.2)
-        pageBox = getPageBox("MediaBox", true, raw);
+        return getPageBoxRaw("MediaBox", true);
     }
 
-    if (!raw)
-    {
-        switch (GetRotation())
-        {
-            case 90:
-            case 270:
-            {
-                double temp = pageBox.Width;
-                pageBox.Width = pageBox.Height;
-                pageBox.Height = temp;
-                break;
-            }
-            case 0:
-            case 180:
-                break;
-            default:
-                PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "Invalid rotation");
-        }
-    }
-
-    return pageBox;
+    return Corners();
 }
 
-void PdfPage::setPageBox(const PdfName& inBox, const Rect& rect, bool raw)
+void PdfPage::setPageBox(const PdfName& inBox, const Rect& rect)
 {
     auto actualRect = rect;
-    if (!raw)
-    {
-        switch (GetRotation())
-        {
-            case 90:
-            case 270:
-            {
-                actualRect.Width = rect.Height;
-                actualRect.Height = rect.Width;
-                break;
-            }
-            case 0:
-            case 180:
-                break;
-            default:
-                PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "Invalid rotation");
-        }
-    }
-
+    adjustRectToCurrentRotation(actualRect);
     PdfArray mediaBox;
     actualRect.ToArray(mediaBox);
     this->GetDictionary().AddKey(inBox, mediaBox);
 }
 
-void PdfPage::loadRotation()
+void PdfPage::adjustRectToCurrentRotation(Rect& rect) const
 {
-    if (m_Rotation >= 0)
-        return;
-
-    m_Rotation = utls::NormalizePageRotation(GetRotationRaw());
+    switch (GetRotation())
+    {
+        case 90:
+        case 270:
+        {
+            double temp = rect.Width;
+            rect.Width = rect.Height;
+            rect.Height = temp;
+            break;
+        }
+        case 0:
+        case 180:
+            break;
+        default:
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InternalLogic, "Invalid rotation");
+    }
 }
 
-double PdfPage::GetRotationRaw() const
+bool PdfPage::TryGetRotationRaw(double& rotation) const
 {
     auto obj = findInheritableAttribute("Rotate");
-    double rotation;
     if (obj == nullptr || !obj->TryGetReal(rotation))
-        return 0;
+    {
+        rotation = 0;
+        return false;
+    }
 
-    return rotation;
+    return true;
 }
 
 void PdfPage::SetRotation(int rotation)
@@ -298,27 +275,20 @@ void PdfPage::SetRotation(int rotation)
     m_Rotation = rotation;
 }
 
-bool PdfPage::MoveAt(unsigned index)
+bool PdfPage::MoveTo(unsigned index)
 {
     if (index == m_Index)
         return false;
 
     auto& pages = GetDocument().GetPages();
-    return pages.TryMovePageAt(m_Index, index);
+    return pages.TryMovePageTo(m_Index, index);
 }
 
-PdfField& PdfPage::CreateField(const string_view& name, PdfFieldType fieldType, const Rect& rect, bool rawRect)
+PdfField& PdfPage::CreateField(const string_view& name, PdfFieldType fieldType, const Rect& rect)
 {
     auto& annotation = static_cast<PdfAnnotationWidget&>(GetAnnotations()
-        .CreateAnnot(PdfAnnotationType::Widget, rect, rawRect));
+        .CreateAnnot(PdfAnnotationType::Widget, rect));
     return PdfField::Create(name, annotation, fieldType);
-}
-
-PdfField& PdfPage::createField(const string_view& name, const type_info& typeInfo, const Rect& rect, bool rawRect)
-{
-    auto& annotation = static_cast<PdfAnnotationWidget&>(GetAnnotations()
-        .CreateAnnot(PdfAnnotationType::Widget, rect, rawRect));
-    return PdfField::Create(name, annotation, typeInfo);
 }
 
 void PdfPage::FlattenStructure()
@@ -341,11 +311,6 @@ void PdfPage::FlattenStructure()
     m_parents.clear();
 }
 
-void PdfPage::EnsureResourcesCreated()
-{
-    ensureResourcesCreated();
-}
-
 void PdfPage::CopyContentsTo(OutputStream& stream) const
 {
     if (m_Contents == nullptr)
@@ -354,29 +319,30 @@ void PdfPage::CopyContentsTo(OutputStream& stream) const
     m_Contents->CopyTo(stream);
 }
 
-void PdfPage::SetMediaBox(const Rect& rect, bool raw)
+void PdfPage::SetMediaBox(const Rect& rect)
 {
-    setPageBox("MediaBox"_n, rect, raw);
+    setPageBox("MediaBox"_n, rect);
+    m_Rect = rect;
 }
 
-void PdfPage::SetCropBox(const Rect& rect, bool raw)
+void PdfPage::SetCropBox(const Rect& rect)
 {
-    setPageBox("CropBox"_n, rect, raw);
+    setPageBox("CropBox"_n, rect);
 }
 
-void PdfPage::SetTrimBox(const Rect& rect, bool raw)
+void PdfPage::SetTrimBox(const Rect& rect)
 {
-    setPageBox("TrimBox"_n, rect, raw);
+    setPageBox("TrimBox"_n, rect);
 }
 
-void PdfPage::SetBleedBox(const Rect& rect, bool raw)
+void PdfPage::SetBleedBox(const Rect& rect)
 {
-    setPageBox("BleedBox"_n, rect, raw);
+    setPageBox("BleedBox"_n, rect);
 }
 
-void PdfPage::SetArtBox(const Rect& rect, bool raw)
+void PdfPage::SetArtBox(const Rect& rect)
 {
-    setPageBox("ArtBox"_n, rect, raw);
+    setPageBox("ArtBox"_n, rect);
 }
 
 unsigned PdfPage::GetPageNumber() const
@@ -410,12 +376,12 @@ PdfObject* PdfPage::getContentsObject()
     if (m_Contents == nullptr)
         return nullptr;
 
-    return &const_cast<PdfContents&>(*m_Contents).GetObject();
+    return &m_Contents->GetObject();
 }
 
 PdfDictionaryElement& PdfPage::getElement()
 {
-    return const_cast<PdfPage&>(*this);
+    return *this;
 }
 
 PdfObject* PdfPage::findInheritableAttribute(const string_view& name) const
@@ -447,8 +413,7 @@ PdfObject* PdfPage::findInheritableAttribute(const string_view& name, bool& isSh
 
 PdfResources& PdfPage::GetOrCreateResources()
 {
-    ensureResourcesCreated();
-    return *m_Resources;
+    return GetResources();
 }
 
 const PdfContents& PdfPage::MustGetContents() const
@@ -467,49 +432,66 @@ PdfContents& PdfPage::MustGetContents()
     return *m_Contents;
 }
 
-const PdfResources& PdfPage::MustGetResources() const
+const PdfResources& PdfPage::GetResources() const
 {
-    if (m_Resources == nullptr)
-        PODOFO_RAISE_ERROR(PdfErrorCode::InvalidHandle);
+    return const_cast<PdfPage&>(*this).GetResources();
+}
 
+PdfResources& PdfPage::GetResources()
+{
+    if (m_Resources != nullptr)
+        return *m_Resources;
+
+    m_Resources.reset(new PdfResources(*this));
     return *m_Resources;
 }
 
-PdfResources& PdfPage::MustGetResources()
+Rect PdfPage::GetMediaBox() const
 {
-    if (m_Resources == nullptr)
-        PODOFO_RAISE_ERROR(PdfErrorCode::InvalidHandle);
-
-    return *m_Resources;
+    return getPageBox("MediaBox", true);
 }
 
-Rect PdfPage::GetMediaBox(bool raw) const
+Corners PdfPage::GetMediaBoxRaw() const
 {
-    return getPageBox("MediaBox", true, raw);
+    return getPageBoxRaw("MediaBox", true);
 }
 
-Rect PdfPage::GetCropBox(bool raw) const
+Rect PdfPage::GetCropBox() const
 {
-    return getPageBox("CropBox", true, raw);
+    return getPageBox("CropBox", true);
 }
 
-Rect PdfPage::GetTrimBox(bool raw) const
+Corners PdfPage::GetCropBoxRaw() const
 {
-    return getPageBox("TrimBox", false, raw);
+    return getPageBoxRaw("CropBox", true);
 }
 
-Rect PdfPage::GetBleedBox(bool raw) const
+Rect PdfPage::GetTrimBox() const
 {
-    return getPageBox("BleedBox", false, raw);
+    return getPageBox("TrimBox", false);
 }
 
-Rect PdfPage::GetArtBox(bool raw) const
+Corners PdfPage::GetTrimBoxRaw() const
 {
-    return getPageBox("ArtBox", false, raw);
+    return getPageBoxRaw("TrimBox", false);
 }
 
-unsigned PdfPage::GetRotation() const
+Rect PdfPage::GetBleedBox() const
 {
-    const_cast<PdfPage&>(*this).loadRotation();
-    return (unsigned)m_Rotation;
+    return getPageBox("BleedBox", false);
+}
+
+Corners PdfPage::GetBleedBoxRaw() const
+{
+    return getPageBoxRaw("BleedBox", false);
+}
+
+Rect PdfPage::GetArtBox() const
+{
+    return getPageBox("ArtBox", false);
+}
+
+Corners PdfPage::GetArtBoxRaw() const
+{
+    return getPageBoxRaw("ArtBox", false);
 }

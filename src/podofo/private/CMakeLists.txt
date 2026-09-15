@@ -11,7 +11,15 @@ if(NOT PODOFO_HAVE_JPEG_LIB)
     )
 endif()
 
-if (PODOFO_BUILD_SHARED AND NOT MSVC)
+if(NOT PODOFO_ENABLE_AFDKO)
+    # Remove AFDKO source if not needed
+    list(REMOVE_ITEM SOURCE_FILES
+        FontUtilsAFDKO.h
+        FontUtilsAFDKO.cpp
+    )
+endif()
+
+if (NOT MSVC)
     # Fixes "relocation against hidden symbol can not
     # be used when making a shared object"
     add_compile_options(-fPIC)
@@ -19,4 +27,4 @@ endif()
 
 add_library(podofo_private STATIC ${SOURCE_FILES})
 
-target_link_libraries(podofo_private PRIVATE ${PODOFO_LIB_DEPENDS})
+target_link_libraries(podofo_private PRIVATE ${PODOFO_3RDPARTY_DEPENDS})

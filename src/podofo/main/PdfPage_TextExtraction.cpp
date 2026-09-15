@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2021 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2021 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfPage.h"
@@ -28,8 +25,6 @@ using namespace PoDoFo;
 
 constexpr double SAME_LINE_THRESHOLD = 0.01;
 constexpr double SEPARATION_EPSILON = 0.0000001;
-// Inferred empirically on Adobe Acrobat Pro
-constexpr unsigned HARD_SEPARATION_SPACING_MULTIPLIER = 6;
 #define ASSERT(condition, message, ...) if (!condition)\
     PoDoFo::LogMessage(PdfLogSeverity::Warning, message, ##__VA_ARGS__);
 
@@ -39,6 +34,12 @@ static constexpr float NaN = numeric_limits<float>::quiet_NaN();
 // 5.3 Text Objects
 struct TextState
 {
+    TextState()
+    {
+        // Reset font size
+        PdfState.FontSize = -1;
+    }
+
     Matrix T_rm;  // Current T_rm
     Matrix CTM;   // Current CTM
     Matrix T_m;   // Current T_m
@@ -46,13 +47,14 @@ struct TextState
     double T_l = 0;             // Leading text Tl
     PdfTextState PdfState;
     Vector2 WordSpacingVectorRaw;
-    Vector2 SpaceCharVectorRaw;
+    Vector2 HardSpacingVectorRaw;
     double WordSpacingLength = 0;
-    double CharSpaceLength = 0;
+    double HardSpacingLength = 0;
     void ComputeDependentState();
     void ComputeSpaceDescriptors();
     void ComputeT_rm();
     double GetWordSpacingLength() const;
+    double GetHardSpacingLength() const;
     double GetSpaceCharLength() const;
     void ScanString(const PdfString& encodedStr, string& decoded, vector<double>& lengths, vector<unsigned>& positions);
 };
@@ -143,7 +145,7 @@ public:
     StringChunkList Chunks;
     TextStateStack States;
     vector<XObjectState> XObjectStateIndices;
-    double CurrentEntryT_rm_y = NaN;    // Tracks line changing
+    double CurrentEntryLineCoord = NaN;    // Tracks line changing
     Vector2 PrevChunkT_rm_Pos;          // Tracks space separation
     bool BlockOpen = false;
 };
@@ -157,6 +159,7 @@ struct GlyphAddress
 static bool decodeString(const PdfString &str, TextState &state, string &decoded,
     vector<double> &lengths, vector<unsigned>& positions);
 static bool areEqual(double lhs, double rhs);
+static double getLineCoordinate(const Matrix& T_rm);
 static bool isWhiteSpaceChunk(const StringChunk &chunk);
 static void splitChunkBySpaces(vector<StringChunkPtr> &splittedChunks, const StringChunk &chunk);
 static void splitStringBySpaces(vector<StatefulString> &separatedStrings, const StatefulString &string);
@@ -192,36 +195,46 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
     ExtractionContext context(entries, *this, pattern, params.Flags, params.ClipRect);
 
     // Look FIGURE 4.1 Graphics objects
-    PdfContentStreamReader reader(*this);
+    PdfContentReaderArgs args;
+    // Images are not needed for text extraction
+    args.Flags = PdfContentReaderFlags::SkipHandleNonFormXObjects | PdfContentReaderFlags::SkipFetchInlineImages;
+    PdfContentStreamReader reader(*this, args);
     PdfContent content;
     vector<double> lengths;
     vector<unsigned> positions;
     string decoded;
+    AbortCheckInfo info;
     while (reader.TryReadNext(content))
     {
-        switch (content.Type)
+        // Check for an abort
+        if (++info.ReadCount % 100 == 0)
+        {
+            if (params.AbortCheck && params.AbortCheck(info))
+                break;
+        }
+
+        switch (content.GetType())
         {
             case PdfContentType::Operator:
             {
-                if ((content.Warnings & PdfContentWarnings::InvalidOperator)
-                    != PdfContentWarnings::None)
+                if (content.HasErrors())
                 {
                     // Ignore invalid operators
                     continue;
                 }
 
                 // T_l TL: Set the text leading, T_l
-                switch (content.Operator)
+                switch (content->Operator)
                 {
                     case PdfOperator::TL:
                     {
-                        context.States.Current->T_l = content.Stack[0].GetReal();
+                        context.States.Current->T_l = content->Stack[0].GetReal();
                         break;
                     }
                     case PdfOperator::cm:
                     {
                         double a, b, c, d, e, f;
-                        read(content.Stack, a, b, c, d, e, f);
+                        read(content->Stack, a, b, c, d, e, f);
                         context.cm_Operator(a, b, c, d, e, f);
                         break;
                     }
@@ -232,19 +245,19 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
                     case PdfOperator::TD:
                     case PdfOperator::Tm:
                     {
-                        if (content.Operator == PdfOperator::Td || content.Operator == PdfOperator::TD)
+                        if (content->Operator == PdfOperator::Td || content->Operator == PdfOperator::TD)
                         {
                             double tx, ty;
-                            read(content.Stack, tx, ty);
+                            read(content->Stack, tx, ty);
                             context.TdTD_Operator(tx, ty);
 
-                            if (content.Operator == PdfOperator::TD)
+                            if (content->Operator == PdfOperator::TD)
                                 context.States.Current->T_l = -ty;
                         }
-                        else if (content.Operator == PdfOperator::Tm)
+                        else if (content->Operator == PdfOperator::Tm)
                         {
                             double a, b, c, d, e, f;
-                            read(content.Stack, a, b, c, d, e, f);
+                            read(content->Stack, a, b, c, d, e, f);
                             context.Tm_Operator(a, b, c, d, e, f);
                         }
                         else
@@ -279,8 +292,8 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
                     // font size Tf : Set the text font, T_f
                     case PdfOperator::Tf:
                     {
-                        double fontSize = content.Stack[0].GetReal();
-                        auto& fontName = content.Stack[1].GetName();
+                        double fontSize = content->Stack[0].GetReal();
+                        auto& fontName = content->Stack[1].GetName();
                         context.Tf_Operator(fontName, fontSize);
                         break;
                     }
@@ -295,12 +308,18 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
                     {
                         ASSERT(context.BlockOpen, "No text block open");
 
-                        auto& str = content.Stack[0].GetString();
-                        if (content.Operator == PdfOperator::DoubleQuote)
+                        auto& str = content->Stack[0].GetString();
+                        if (content->Operator == PdfOperator::DoubleQuote)
                         {
                             // Operator " arguments: aw ac string "
-                            context.States.Current->PdfState.CharSpacing = content.Stack[1].GetReal();
-                            context.States.Current->PdfState.WordSpacing = content.Stack[2].GetReal();
+                            context.States.Current->PdfState.CharSpacing = content->Stack[1].GetReal();
+                            context.States.Current->PdfState.WordSpacing = content->Stack[2].GetReal();
+                        }
+
+                        if (content->Operator == PdfOperator::Quote
+                            || content->Operator == PdfOperator::DoubleQuote)
+                        {
+                            context.TStar_Operator();
                         }
 
                         if (decodeString(str, *context.States.Current, decoded, lengths, positions)
@@ -310,12 +329,6 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
                                 std::move(lengths), std::move(positions)), true);
                         }
 
-                        if (content.Operator == PdfOperator::Quote
-                            || content.Operator == PdfOperator::DoubleQuote)
-                        {
-                            context.TStar_Operator();
-                        }
-
                         break;
                     }
                     // array TJ : Show one or more text strings
@@ -323,7 +336,7 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
                     {
                         ASSERT(context.BlockOpen, "No text block open");
 
-                        auto& array = content.Stack[0].GetArray();
+                        auto& array = content->Stack[0].GetArray();
                         for (unsigned i = 0; i < array.GetSize(); i++)
                         {
                             const PdfString* str;
@@ -341,7 +354,7 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
                             else if (obj.TryGetReal(real))
                             {
                                 // pg. 408, Pdf Reference 1.7: "The number is expressed in thousandths of a unit
-                                // of text space. [...] This amount is subtracted from from the current horizontal or
+                                // of text space. [...] This amount is subtracted from the current horizontal or
                                 // vertical coordinate, depending on the writing mode"
                                 // It must be scaled by the font size
                                 double space = (-real / 1000) * context.States.Current->PdfState.FontSize;
@@ -359,12 +372,12 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
                     // Tc : word spacing
                     case PdfOperator::Tc:
                     {
-                        context.States.Current->PdfState.CharSpacing = content.Stack[0].GetReal();
+                        context.States.Current->PdfState.CharSpacing = content->Stack[0].GetReal();
                         break;
                     }
                     case PdfOperator::Tw:
                     {
-                        context.States.Current->PdfState.WordSpacing = content.Stack[0].GetReal();
+                        context.States.Current->PdfState.WordSpacing = content->Stack[0].GetReal();
                         break;
                     }
                     // q : Save the current graphics state
@@ -397,24 +410,30 @@ void PdfPage::ExtractTextTo(vector<PdfTextEntry>& entries, const string_view& pa
                 // Ignore image data token
                 break;
             }
-            case PdfContentType::DoXObject:
+            case PdfContentType::BeginFormXObject:
             {
-                if (content.XObject->GetType() == PdfXObjectType::Form)
-                {
-                    context.XObjectStateIndices.push_back({
-                        (const PdfXObjectForm*)content.XObject.get(),
-                        context.States.GetSize()
+                context.XObjectStateIndices.push_back({
+                    (const PdfXObjectForm*)content->XObject.get(),
+                    context.States.GetSize()
                     });
-                    context.States.Push();
-                }
+                context.States.Push();
 
+                // The form XObject matrix concatenates to
+                // the CTM like a 'cm' operator
+                auto& matrix = content->XObject->GetMatrix();
+                context.cm_Operator(matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5]);
                 break;
             }
-            case PdfContentType::EndXObjectForm:
+            case PdfContentType::EndFormXObject:
             {
                 PODOFO_ASSERT(context.XObjectStateIndices.size() != 0);
                 context.States.Pop(context.States.GetSize() - context.XObjectStateIndices.back().TextStateIndex);
                 context.XObjectStateIndices.pop_back();
+                break;
+            }
+            case PdfContentType::DoXObject:
+            {
+                // Ignore handling of non Form XObjects
                 break;
             }
             default:
@@ -646,6 +665,10 @@ void addEntryChunk(vector<PdfTextEntry> &textEntries, StringChunkList &chunks, c
     {
         Vector2 rawp(strPosition.X, strPosition.Y);
         auto p_1 = rawp * (*rotation);
+        // Also transform bbox to canonical frame
+        if (bbox.has_value())
+            bbox = *bbox * (*rotation);
+
         textEntries.push_back(PdfTextEntry{ str, pageIndex,
             p_1.X, p_1.Y, strLength, bbox });
     }
@@ -677,12 +700,12 @@ bool decodeString(const PdfString &str, TextState &state, string &decoded,
         if (!str.IsHex())
         {
             // As a fallback try to retrieve the raw string
-            // CHECK-ME: Maybe intrepret them as PdfDocEncoding?
+            // CHECK-ME: Maybe interpret them as PdfDocEncoding?
             decoded = str.GetString();
             lengths.resize(decoded.length());
-            positions.reserve(decoded.length());
+            positions.resize(decoded.length());
             for (unsigned i = 0; i < decoded.length(); i++)
-                positions.push_back(i);
+                positions[i] = i;
 
             return true;
         }
@@ -855,8 +878,8 @@ ExtractionContext::ExtractionContext(vector<PdfTextEntry>& entries, const PdfPag
 
     // Determine page rotation transformation
     double teta;
-    if (page.HasRotation(teta))
-        Rotation = std::make_unique<Matrix>(PoDoFo::GetFrameRotationTransform(page.GetRectRaw(), teta));
+    if (page.TryGetRotationRadians(teta))
+        Rotation = std::make_unique<Matrix>(PoDoFo::GetFrameRotationTransform((Rect)page.GetRectRaw(), teta));
 }
 
 void ExtractionContext::BeginText()
@@ -879,8 +902,8 @@ void ExtractionContext::EndText()
 void ExtractionContext::Tf_Operator(const PdfName &fontname, double fontsize)
 {
     auto resources = getActualCanvas().GetResources();
-    double spacingLengthRaw = 0;
-    double spaceCharLengthRaw = 0;
+    double wordSpacingLengthRaw = 0;
+    double hardSpacingLengthRaw = 0;
     States.Current->PdfState.FontSize = fontsize;
     if (resources == nullptr || (States.Current->PdfState.Font = resources->GetFont(fontname)) == nullptr)
     {
@@ -888,22 +911,22 @@ void ExtractionContext::Tf_Operator(const PdfName &fontname, double fontsize)
     }
     else
     {
-        spacingLengthRaw = States.Current->GetWordSpacingLength();
-        spaceCharLengthRaw = States.Current->GetSpaceCharLength();
+        wordSpacingLengthRaw = States.Current->GetWordSpacingLength();
+        hardSpacingLengthRaw = States.Current->GetHardSpacingLength();
     }
 
-    States.Current->WordSpacingVectorRaw = Vector2(spacingLengthRaw, 0);
-    if (spacingLengthRaw == 0)
+    States.Current->WordSpacingVectorRaw = Vector2(wordSpacingLengthRaw, 0);
+    if (wordSpacingLengthRaw == 0)
     {
         PoDoFo::LogMessage(PdfLogSeverity::Warning, "Unable to provide a word spacing length, setting default font size");
         States.Current->WordSpacingVectorRaw = Vector2(fontsize, 0);
     }
 
-    States.Current->SpaceCharVectorRaw = Vector2(spaceCharLengthRaw, 0);
-    if (spaceCharLengthRaw == 0)
+    States.Current->HardSpacingVectorRaw = Vector2(hardSpacingLengthRaw, 0);
+    if (hardSpacingLengthRaw == 0)
     {
-        PoDoFo::LogMessage(PdfLogSeverity::Warning, "Unable to provide a space char length, setting default font size");
-        States.Current->SpaceCharVectorRaw = Vector2(fontsize, 0);
+        PoDoFo::LogMessage(PdfLogSeverity::Warning, "Unable to provide a hard spacing length, setting default font size");
+        States.Current->HardSpacingVectorRaw = Vector2(fontsize, 0);
     }
 
     States.Current->ComputeSpaceDescriptors();
@@ -913,14 +936,14 @@ void ExtractionContext::cm_Operator(double a, double b, double c, double d, doub
 {
     // TABLE 4.7: "cm" Modify the current transformation
     // matrix (CTM) by concatenating the specified matrix
-    Matrix cm = Matrix::FromCoefficients(a, b, c, d, e, f);
+    Matrix cm(a, b, c, d, e, f);
     States.Current->CTM = cm * States.Current->CTM;
     States.Current->ComputeT_rm();
 }
 
 void ExtractionContext::Tm_Operator(double a, double b, double c, double d, double e, double f)
 {
-    States.Current->T_lm = Matrix::FromCoefficients(a, b, c, d, e, f);
+    States.Current->T_lm = Matrix(a, b, c, d, e, f);
     States.Current->T_m = States.Current->T_lm;
     States.Current->ComputeDependentState();
 }
@@ -949,16 +972,16 @@ void ExtractionContext::AdvanceSpace(double tx)
 void ExtractionContext::PushString(const StatefulString &str, bool pushchunk)
 {
     PODOFO_ASSERT(str.String.length() != 0);
-    if (std::isnan(CurrentEntryT_rm_y))
+    if (std::isnan(CurrentEntryLineCoord))
     {
         // Initialize tracking for line
-        CurrentEntryT_rm_y = States.Current->T_rm.Get<Ty>();
+        CurrentEntryLineCoord = getLineCoordinate(States.Current->T_rm);
     }
 
     tryAddEntry(str);
 
     // Set current line tracking
-    CurrentEntryT_rm_y = States.Current->T_rm.Get<Ty>();
+    CurrentEntryLineCoord = getLineCoordinate(States.Current->T_rm);
     Chunk->push_back(str);
     if (pushchunk)
         pushChunk();
@@ -1022,14 +1045,14 @@ void ExtractionContext::tryAddEntry(const StatefulString& currStr)
     PODOFO_INVARIANT(Chunk != nullptr);
     if (Chunks.size() > 0 || Chunk->size() > 0)
     {
-        if (areEqual(States.Current->T_rm.Get<Ty>(), CurrentEntryT_rm_y))
+        if (areEqual(getLineCoordinate(States.Current->T_rm), CurrentEntryLineCoord))
         {
             double distance;
             if (areChunksSpaced(distance))
             {
                 if (Options.TokenizeWords
                     || distance + SEPARATION_EPSILON >
-                        States.Current->CharSpaceLength * HARD_SEPARATION_SPACING_MULTIPLIER)
+                        States.Current->HardSpacingLength)
                 {
                     // Current entry is space separated and either we
                     //  tokenize words, or it's an hard entry separation
@@ -1059,19 +1082,32 @@ bool ExtractionContext::areChunksSpaced(double& distance)
     // TODO
     // 1) Handle the word spacing Tw state
     // 2) Handle the char spacing Tc state (is it actually needed?)
-    // 3) Handle arbitrary rotations
-    // 4) Handle vertical scripts (HARD)
-    // 5) Try to avoid computing GetLength() and use only dot product
+    // 3) Handle vertical scripts (HARD)
+    // 4) Try to avoid computing GetLength() and use only dot product
     auto curr = States.Current->T_rm.GetTranslationVector();
     auto prev_curr = curr - PrevChunkT_rm_Pos;
     distance = prev_curr.GetLength();
-    double dot1 = prev_curr.Dot(Vector2(1, 0)); // Hardcoded for horizontal text
+
+    // Use actual text direction from T_rm instead of hardcoded (1,0)
+    Vector2 textDir(States.Current->T_rm[0], States.Current->T_rm[1]);
+    double textDirLen = textDir.GetLength();
+    if (textDirLen > 0)
+    {
+        textDir.X /= textDirLen;
+        textDir.Y /= textDirLen;
+    }
+    else
+    {
+        textDir = Vector2(1, 0);
+    }
+
+    double dot1 = prev_curr.Dot(textDir);
     bool spaced = distance + SEPARATION_EPSILON >= States.Current->WordSpacingLength;
     if (dot1 < 0 && spaced)
     {
         auto& prevString = getPreviouString();
         auto prev_init = prevString.Position - PrevChunkT_rm_Pos;
-        double dot2 = prev_init.Dot(Vector2(1, 0));
+        double dot2 = prev_init.Dot(textDir);
         return dot1 < dot2;
     }
 
@@ -1109,7 +1145,7 @@ void splitChunkBySpaces(vector<StringChunkPtr> &splittedChunks, const StringChun
 }
 
 // Separate string words by spaces
-void splitStringBySpaces(vector<StatefulString> &separatedStrings, const StatefulString &str)
+void splitStringBySpaces(vector<StatefulString>& separatedStrings, const StatefulString& str)
 {
     PODOFO_ASSERT(str.String.length() != 0);
     separatedStrings.clear();
@@ -1121,7 +1157,7 @@ void splitStringBySpaces(vector<StatefulString> &separatedStrings, const Statefu
     unsigned upperPosLim = (unsigned)str.String.length();
     unsigned lowerPosIndex;
     unsigned upperPosLimIndex;
-    
+
     auto pushString = [&]() {
         getSubstringIndices(str.StringPositions, lowerPos, upperPosLim, lowerPosIndex, upperPosLimIndex);
         double length = 0;
@@ -1225,6 +1261,25 @@ bool areEqual(double lhs, double rhs)
     return std::abs(lhs - rhs) < SAME_LINE_THRESHOLD;
 }
 
+// Compute a scalar "line coordinate" by projecting the T_rm position
+// onto the normalized perpendicular of the text direction. Two positions
+// on the same text line yield the same value regardless of rotation.
+static double getLineCoordinate(const Matrix& T_rm)
+{
+    // Text direction in page space: (T_rm[0], T_rm[1])
+    // Perpendicular (line-normal): (-T_rm[1], T_rm[0])
+    double perpX = -T_rm[1];
+    double perpY = T_rm[0];
+    double perpLen = std::sqrt(perpX * perpX + perpY * perpY);
+    if (perpLen > 0)
+    {
+        perpX /= perpLen;
+        perpY /= perpLen;
+    }
+    auto pos = T_rm.GetTranslationVector();
+    return perpX * pos.X + perpY * pos.Y;
+}
+
 void TextState::ComputeDependentState()
 {
     ComputeSpaceDescriptors();
@@ -1234,7 +1289,7 @@ void TextState::ComputeDependentState()
 void TextState::ComputeSpaceDescriptors()
 {
     WordSpacingLength = (WordSpacingVectorRaw * T_m.GetScalingRotation()).GetLength();
-    CharSpaceLength = (SpaceCharVectorRaw * T_m.GetScalingRotation()).GetLength();
+    HardSpacingLength = (HardSpacingVectorRaw * T_m.GetScalingRotation()).GetLength();
 }
 
 void TextState::ComputeT_rm()
@@ -1245,6 +1300,11 @@ void TextState::ComputeT_rm()
 double TextState::GetWordSpacingLength() const
 {
     return PdfState.Font->GetWordSpacingLength(PdfState);
+}
+
+double TextState::GetHardSpacingLength() const
+{
+    return PdfState.Font->GetHardSpacingLength(PdfState);
 }
 
 double TextState::GetSpaceCharLength() const
@@ -1294,7 +1354,7 @@ double computeLength(const vector<const StatefulString*>& strings, const vector<
         // NOTE: Include the last glyph
         auto str = strings[fromAddr.StringIndex];
         double length = 0;
-        for (unsigned i = 0; i <= toAddr.GlyphIndex; i++)
+        for (unsigned i = fromAddr.GlyphIndex; i <= toAddr.GlyphIndex; i++)
             length += str->Lengths[i];
 
         return length;
@@ -1304,15 +1364,34 @@ double computeLength(const vector<const StatefulString*>& strings, const vector<
         auto fromStr = strings[fromAddr.StringIndex];
         auto toStr = strings[toAddr.StringIndex];
 
+        // Compute text direction from T_rm for proper advancement
+        auto& fromT_rm = fromStr->State.T_rm;
+        Vector2 fromTextDir(fromT_rm[0], fromT_rm[1]);
+        double fromDirLen = fromTextDir.GetLength();
+        if (fromDirLen > 0)
+        {
+            fromTextDir.X /= fromDirLen;
+            fromTextDir.Y /= fromDirLen;
+        }
+
+        auto& toT_rm = toStr->State.T_rm;
+        Vector2 toTextDir(toT_rm[0], toT_rm[1]);
+        double toDirLen = toTextDir.GetLength();
+        if (toDirLen > 0)
+        {
+            toTextDir.X /= toDirLen;
+            toTextDir.Y /= toDirLen;
+        }
+
         // Advance the position before the first glyph
         auto fromPosition = fromStr->Position;
         for (unsigned i = 0; i < fromAddr.GlyphIndex; i++)
-            fromPosition += Vector2(fromStr->Lengths[i], 0);
+            fromPosition += Vector2(fromTextDir.X * fromStr->Lengths[i], fromTextDir.Y * fromStr->Lengths[i]);
 
         // NOTE: Include the last glyph
         auto toPosition = toStr->Position;
         for (unsigned i = 0; i <= toAddr.GlyphIndex; i++)
-            toPosition += Vector2(toStr->Lengths[i], 0);
+            toPosition += Vector2(toTextDir.X * toStr->Lengths[i], toTextDir.Y * toStr->Lengths[i]);
 
         return (fromPosition - toPosition).GetLength();
     }
@@ -1370,17 +1449,49 @@ Rect computeBoundingBox(const TextState& textState, double boxWidth)
     double ascent = 0;
     auto& pdfState = textState.PdfState;
     auto font = pdfState.Font;
-    auto transform = textState.T_rm.GetScalingRotation();
+    auto scalingRotation = textState.T_rm.GetScalingRotation();
     if (font != nullptr)
     {
         descend = (Vector2(0, font->GetMetrics().GetDescent() * pdfState.FontSize * pdfState.FontScale)
-            * transform).GetLength();
+            * scalingRotation).GetLength();
         ascent = (Vector2(0, font->GetMetrics().GetAscent() * pdfState.FontSize * pdfState.FontScale)
-            * transform).GetLength();
+            * scalingRotation).GetLength();
     }
 
+    // Compute text direction and perpendicular from T_rm
+    Vector2 textDir(textState.T_rm[0], textState.T_rm[1]);
+    double textDirLen = textDir.GetLength();
+    if (textDirLen > 0)
+    {
+        textDir.X /= textDirLen;
+        textDir.Y /= textDirLen;
+    }
+    else
+    {
+        textDir = Vector2(1, 0);
+    }
+
+    // Perpendicular direction (points from descent to ascent)
+    Vector2 perpDir(-textDir.Y, textDir.X);
+
+    // Build oriented box corners from baseline origin
+    // This fits the text also in case of non-orthogonal rotations
     auto position = textState.T_rm.GetTranslationVector();
-    return Rect(position.X, position.Y - descend, boxWidth, descend + ascent);
+    // Four corners: baseline-start, baseline-end, top-start, top-end
+    Vector2 c1(position.X + perpDir.X * (-descend), position.Y + perpDir.Y * (-descend));
+    Vector2 c2(position.X + textDir.X * boxWidth + perpDir.X * (-descend),
+               position.Y + textDir.Y * boxWidth + perpDir.Y * (-descend));
+    Vector2 c3(position.X + perpDir.X * ascent, position.Y + perpDir.Y * ascent);
+    Vector2 c4(position.X + textDir.X * boxWidth + perpDir.X * ascent,
+               position.Y + textDir.Y * boxWidth + perpDir.Y * ascent);
+
+    // Compute axis-aligned bounding box enclosing all corners
+    double minX = std::min({ c1.X, c2.X, c3.X, c4.X });
+    double minY = std::min({ c1.Y, c2.Y, c3.Y, c4.Y });
+    double maxX = std::max({ c1.X, c2.X, c3.X, c4.X });
+    double maxY = std::max({ c1.Y, c2.Y, c3.Y, c4.Y });
+
+    return Rect(minX, minY, maxX - minX, maxY - minY);
 }
 
 void getSubstringIndices(const vector<unsigned>& positions, unsigned lowerPos, unsigned upperPosLim,

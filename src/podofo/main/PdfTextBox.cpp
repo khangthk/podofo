@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfTextBox.h"
@@ -11,14 +9,14 @@
 using namespace std;
 using namespace PoDoFo;
 
-PdfTextBox::PdfTextBox(PdfAcroForm& acroform, const shared_ptr<PdfField>& parent)
-    : PdfField(acroform, PdfFieldType::TextBox, parent)
+PdfTextBox::PdfTextBox(PdfAcroForm& acroform, shared_ptr<PdfField>&& parent)
+    : PdfField(acroform, PdfFieldType::TextBox, std::move(parent))
 {
     init();
 }
 
-PdfTextBox::PdfTextBox(PdfAnnotationWidget& widget, const shared_ptr<PdfField>& parent)
-    : PdfField(widget, PdfFieldType::TextBox, parent)
+PdfTextBox::PdfTextBox(PdfAnnotationWidget& widget, shared_ptr<PdfField>&& parent)
+    : PdfField(widget, PdfFieldType::TextBox, std::move(parent))
 {
     init();
 }
@@ -112,12 +110,12 @@ bool PdfTextBox::IsFileField() const
     return this->GetFieldFlag(static_cast<int>(PdfTextBox_FileSelect), false);
 }
 
-void PdfTextBox::SetSpellcheckingEnabled(bool spellcheck)
+void PdfTextBox::SetSpellCheckingEnabled(bool spellcheck)
 {
     this->SetFieldFlag(static_cast<int>(PdfTextBox_NoSpellcheck), !spellcheck);
 }
 
-bool PdfTextBox::IsSpellcheckingEnabled() const
+bool PdfTextBox::IsSpellCheckingEnabled() const
 {
     return this->GetFieldFlag(static_cast<int>(PdfTextBox_NoSpellcheck), true);
 }

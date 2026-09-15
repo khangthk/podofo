@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_FONT_CACHE_H
 #define PDF_FONT_CACHE_H
@@ -30,24 +28,24 @@ struct PODOFO_API PdfFontSearchParams final
     nullable<PdfFontStyle> Style;
     PdfFontAutoSelectBehavior AutoSelect = PdfFontAutoSelectBehavior::None;
     PdfFontMatchBehaviorFlags MatchBehavior = PdfFontMatchBehaviorFlags::None;
+    ///< A font family name specific pattern, to be alternatively used when postscript name match failed
+    std::string FontFamilyPattern;
 
     ///< A function to select the font in case multiple fonts with same characteristics found. Default return first
     std::function<PdfFont* (const std::vector<PdfFont*>)> FontSelector;
 };
 
-/**
- * This class assists PdfDocument
- * with caching font information.
- *
- * Additional to font caching, this class is also
- * responsible for font matching.
- *
- * PdfFont is an actual font that can be used in
- * a PDF file (i.e. it does also font embedding)
- * and PdfFontMetrics provides only metrics information.
- *
- * \see PdfDocument
- */
+/// This class assists PdfDocument
+/// with caching font information.
+///
+/// Additional to font caching, this class is also
+/// responsible for font matching.
+///
+/// PdfFont is an actual font that can be used in
+/// a PDF file (i.e. it does also font embedding)
+/// and PdfFontMetrics provides only metrics information.
+///
+/// @see PdfDocument
 class PODOFO_API PdfFontManager final
 {
     friend class PdfDocument;
@@ -58,47 +56,82 @@ class PODOFO_API PdfFontManager final
     friend class PdfResources;
 
 public:
-    /** Get a font from the cache. If the font does not yet
-     *  exist, add it to the cache.
-     *
-     *  \param fontPattern a search font pattern
-     *  \param params font creation params
-     *
-     *  \returns a PdfFont object or nullptr if the font could
-     *           not be created or found.
-     */
+    /// Get a font from the cache. If the font does not yet
+    /// exist, add it to the cache.
+    ///
+    /// @param fontPattern a search font pattern
+    /// @param searchParams font search params
+    /// @param createParams font creation params
+    ///
+    /// @returns a PdfFont object or nullptr if the font could
+    ///           not be created or found.
     PdfFont* SearchFont(const std::string_view& fontPattern,
         const PdfFontSearchParams& searchParams = { }, const PdfFontCreateParams& createParams = { });
 
+    /// Get a font from the cache. If the font does not yet
+    /// exist, add it to the cache.
+    ///
+    /// @param fontPattern a search font pattern
+    /// @param createParams font creation params
+    ///
+    /// @returns a PdfFont object or nullptr if the font could
+    ///           not be created or found.
     PdfFont* SearchFont(const std::string_view& fontPattern, const PdfFontCreateParams& createParams);
 
+    /// Get a Standard 14 font.
+    /// @param stdFont the standard 14 font type
+    /// @param params font creation params
+    /// @returns a PdfFont object
     PdfFont& GetStandard14Font(PdfStandard14FontType stdFont,
         const PdfFontCreateParams& params = { });
 
+    /// Get or create a font from a file path.
+    /// @param fontPath the path to the font file
+    /// @param faceIndex the index of the face within the font file
+    /// @param params font creation params
+    /// @returns a PdfFont object
     PdfFont& GetOrCreateFont(const std::string_view& fontPath, unsigned faceIndex,
         const PdfFontCreateParams& params = { });
 
+    /// Get or create a font from a buffer.
+    /// @param buffer the buffer containing the font data
+    /// @param faceIndex the index of the face within the font file
+    /// @param params font creation params
+    /// @returns a PdfFont object
     PdfFont& GetOrCreateFontFromBuffer(const bufferview& buffer, unsigned faceIndex,
         const PdfFontCreateParams& params = { });
 
+    /// Get or create a font from a file path.
+    /// @param fontPath the path to the font file
+    /// @param params font creation params
+    /// @returns a PdfFont object
     PdfFont& GetOrCreateFont(const std::string_view& fontPath,
         const PdfFontCreateParams& params = { });
 
+    /// Get or create a font from a buffer.
+    /// @param buffer the buffer containing the font data
+    /// @param params font creation params
+    /// @returns a PdfFont object
     PdfFont& GetOrCreateFontFromBuffer(const bufferview& buffer,
         const PdfFontCreateParams& params = { });
 
-    PdfFont& GetOrCreateFont(const PdfFontMetricsConstPtr& metrics,
+    /// Get or create a font from existing metrics.
+    /// @param metrics the font metrics
+    /// @param params font creation params
+    /// @returns a PdfFont object
+    PdfFont& GetOrCreateFont(PdfFontMetricsConstPtr metrics,
         const PdfFontCreateParams& params = { });
 
-    /** Try getting the font from the cached font map
-     * Can return nullptr
-     */
+    /// Try getting the font from the cached font map
+    /// @param ref the reference of the font
+    /// @returns the cached font or nullptr
     PdfFont* GetCachedFont(const PdfReference& ref);
 
-    /** Try to search for fontmetrics from the given fontname and parameters
-     *
-     * \returns the found metrics. Null if not found
-     */
+    /// Try to search for fontmetrics from the given fontname and parameters
+    ///
+    /// @param fontPattern a search font pattern
+    /// @param params font search params
+    /// @returns the found metrics. Null if not found
     static PdfFontMetricsConstPtr SearchFontMetrics(const std::string_view& fontPattern,
         const PdfFontSearchParams& params = { });
 
@@ -107,20 +140,19 @@ public:
 #endif
 
 #ifdef PODOFO_HAVE_FONTCONFIG
-    /**
-     * Set wrapper for the fontconfig library.
-     * Useful to avoid initializing Fontconfig multiple times.
-     *
-     * This setter can be called until first use of Fontconfig
-     * as the library is initialized at first use.
-     */
+    /// Set wrapper for the fontconfig library.
+    /// Useful to avoid initializing Fontconfig multiple times.
+    ///
+    /// This setter can be called until first use of Fontconfig
+    /// as the library is initialized at first use.
     static void SetFontConfigWrapper(const std::shared_ptr<PdfFontConfigWrapper>& fontConfig);
 
     static PdfFontConfigWrapper& GetFontConfigWrapper();
 #endif // PODOFO_HAVE_FONTCONFIG
 
-    /** Called by PdfDocument before saving
-     */
+    /// Embed all imported fonts
+    /// @remarks This is called by PdfDocument before saving, so
+    /// it's usually not necessary to call it manually
     void EmbedFonts();
 
     // These methods are reserved to use to selected friend classes
@@ -130,24 +162,25 @@ private:
 private:
     const PdfFont* GetLoadedFont(const PdfResources& resources, const std::string_view& name);
 
-    /**
-     * Empty the internal font cache.
-     * This should be done whenever a new document
-     * is created or opened.
-     */
+    /// Empty the internal font cache.
+    /// This should be done whenever a new document
+    /// is created or opened.
     void Clear();
 
     PdfFont* AddImported(std::unique_ptr<PdfFont>&& font);
 
-    /** Returns a new ABCDEF+ like font subset prefix
-     */
+    /// Returns a new ABCDEF+ like font subset prefix
     std::string GenerateSubsetPrefix();
 
     static void AddFontDirectory(const std::string_view& path);
 
+    /// NOTE: This overload doesn't perform normalization or Std14 font search
+    /// @param skipNormalization the font search is not normalized for embedding purposes
+    static PdfFontMetricsConstPtr SearchFontMetrics(const std::string_view& fontPattern,
+        const PdfFontSearchParams& params, const PdfFontMetrics& metrics, bool skipNormalization);
+
 private:
-    /** A private structure, which represents a cached font
-     */
+    /// A private structure, which represents a cached font
     struct Descriptor
     {
         Descriptor(const std::string_view& name, PdfStandard14FontType stdType,
@@ -197,23 +230,12 @@ private:
     using FontMap = std::unordered_map<PdfReference, Storage>;
 
 private:
-#ifdef PODOFO_HAVE_FONTCONFIG
-    static std::shared_ptr<PdfFontConfigWrapper> ensureInitializedFontConfig();
-#endif // PODOFO_HAVE_FONTCONFIG
-
-    static std::unique_ptr<const PdfFontMetrics> getFontMetrics(const std::string_view& fontName,
-        const PdfFontSearchParams& params);
-    PdfFont* getImportedFont(const std::string_view& patternName,
+    static std::unique_ptr<const PdfFontMetrics> searchFontMetrics(const std::string_view& fontName,
+        const PdfFontSearchParams& params, const PdfFontMetrics* refMetrics, bool skipNormalization);
+    PdfFont* getImportedFont(const std::string_view& pattern,
         const PdfFontSearchParams& searchParams, const PdfFontCreateParams& createParams);
-    static void adaptSearchParams(std::string& patternName,
-        PdfFontSearchParams& searchParams);
     PdfFont* addImported(std::vector<PdfFont*>& fonts, std::unique_ptr<PdfFont>&& font);
-    PdfFont& getOrCreateFontHashed(const PdfFontMetricsConstPtr& metrics, const PdfFontCreateParams& params);
-
-#if defined(_WIN32) && defined(PODOFO_HAVE_WIN32GDI)
-    static std::unique_ptr<charbuff> getWin32FontData(const std::string_view& fontName,
-        const PdfFontSearchParams& params);
-#endif
+    PdfFont& getOrCreateFontHashed(PdfFontMetricsConstPtr&& metrics, const PdfFontCreateParams& params);
 
 private:
     PdfFontManager(const PdfFontManager&) = delete;

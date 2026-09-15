@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfDataContainer.h"
@@ -14,15 +12,16 @@
 using namespace PoDoFo;
 
 PdfDataContainer::PdfDataContainer()
-    : m_Owner(nullptr)
+    : m_Owner(nullptr), m_Document(nullptr)
 {
 }
 
 PdfDataContainer::~PdfDataContainer() { }
 
-void PdfDataContainer::SetOwner(PdfObject& owner)
+void PdfDataContainer::SetOwner(PdfObject& owner, PdfDocument* document)
 {
     m_Owner = &owner;
+    m_Document = document;
     setChildrenParent();
 }
 
@@ -36,11 +35,10 @@ PdfObject* PdfDataContainer::GetIndirectObject(const PdfReference& ref) const
     if (m_Owner == nullptr)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "Object is a reference but does not have an owner");
 
-    auto document = m_Owner->GetDocument();
-    if (document == nullptr)
+    if (m_Document == nullptr)
         PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "Object owner is not part of any document");
 
-    return document->GetObjects().GetObject(ref);
+    return m_Document->GetObjects().GetObject(ref);
 }
 
 void PdfDataContainer::SetDirty()
@@ -55,7 +53,7 @@ bool PdfDataContainer::IsIndirectReferenceAllowed(const PdfObject& obj)
     if (obj.IsIndirect()
         && (objDocument = obj.GetDocument()) != nullptr
         && m_Owner != nullptr
-        && objDocument == m_Owner->GetDocument())
+        && objDocument == m_Document)
     {
         return true;
     }
@@ -69,10 +67,6 @@ void PdfDataContainer::AssertMutable() const
         PODOFO_RAISE_ERROR(PdfErrorCode::ChangeOnImmutable);
 }
 
-PdfDocument* PdfDataContainer::GetObjectDocument()
-{
-    return m_Owner == nullptr ? nullptr : m_Owner->GetDocument();
-}
 
 PdfIndirectIterableBase::PdfIndirectIterableBase()
     : m_Objects(nullptr) { }

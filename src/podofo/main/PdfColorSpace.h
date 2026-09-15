@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_COLOR_SPACE_H
 #define PDF_COLOR_SPACE_H
@@ -14,60 +11,24 @@ namespace PoDoFo {
 
 class PdfDocument;
 
-class PODOFO_API PdfColorSpace final : public PdfDictionaryElement
+class PODOFO_API PdfColorSpace final : public PdfElement
 {
     friend class PdfDocument;
+
 private:
-    PdfColorSpace(PdfDocument& doc, const PdfColorSpaceFilterPtr& filter);
+    PdfColorSpace(PdfDocument& doc, PdfColorSpaceFilterPtr&& filter);
 
     PdfColorSpace(const PdfColorSpace&) = default;
-public:
-    const PdfColorSpaceFilter& GetFilter() const { return *m_Filter; }
-    PdfColorSpaceFilterPtr GetFilterPtr() const { return m_Filter; }
-private:
-    PdfColorSpaceFilterPtr m_Filter;
-};
-
-/**
- * A proxy class that can used to identify a color space choosing
- * from several input types
- */
-class PODOFO_API PdfColorSpaceInitializer final
-{
-    PODOFO_STACK_ONLY
-
-public:
-    /** A null color space
-     */
-    PdfColorSpaceInitializer();
-
-    /** Identify a color space from a filter
-     */
-    PdfColorSpaceInitializer(const PdfColorSpaceFilterPtr& filter);
-    /** Identify a color space from color space document element
-     */
-    PdfColorSpaceInitializer(const PdfColorSpace& colorSpace);
-    /** Identify a trivial colorspace from its enum type (DeviceGray, DeviceRGB or DeviceCYMC)
-     */
-    PdfColorSpaceInitializer(PdfColorSpaceType colorSpace);
-
-public:
-    PdfObject GetExportObject(PdfIndirectObjectList& objects) const;
-
-    bool IsNull() const;
-
-    PdfColorSpaceFilterPtr Take(const PdfColorSpace*& element);
-
-    PdfColorSpaceInitializer(const PdfColorSpaceInitializer&) = default;
-    PdfColorSpaceInitializer& operator=(const PdfColorSpaceInitializer&) = default;
 
 public:
     const PdfColorSpaceFilter& GetFilter() const { return *m_Filter; }
     PdfColorSpaceFilterPtr GetFilterPtr() const { return m_Filter; }
 
+protected:
+    static PdfObject& getExportObject(PdfDocument& doc, const PdfColorSpaceFilter* filter);
+
 private:
     PdfColorSpaceFilterPtr m_Filter;
-    const PdfColorSpace* m_Element;
 };
 
 }

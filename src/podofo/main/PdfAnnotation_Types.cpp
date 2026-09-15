@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfAnnotation_Types.h"
@@ -18,7 +15,7 @@ void PdfAnnotationLink::SetDestination(nullable<const PdfDestination&> destinati
     if (destination == nullptr)
     {
         GetDictionary().RemoveKey("Dest");
-        m_Destination = { };
+        m_Destination *= nullptr;
     }
     else
     {
@@ -44,7 +41,7 @@ nullable<PdfDestination&> PdfAnnotationLink::getDestination()
     {
         auto obj = GetDictionary().FindKey("Dest");
         if (obj == nullptr)
-            m_Destination = { };
+            m_Destination *= nullptr;
         else
             m_Destination = unique_ptr<PdfDestination>(new PdfDestination(*obj));
     }
@@ -65,7 +62,7 @@ void PdfAnnotationFileAttachment::SetFileAttachment(const nullable<PdfFileSpec&>
 {
     if (fileSpec == nullptr)
     {
-        m_FileSpec = { };
+        m_FileSpec *= nullptr;
         GetDictionary().RemoveKey("FS");
     }
     else
@@ -92,7 +89,7 @@ nullable<PdfFileSpec&> PdfAnnotationFileAttachment::getFileAttachment()
     {
         auto obj = GetDictionary().FindKey("FS");
         if (obj == nullptr)
-            m_FileSpec = { };
+            m_FileSpec *= nullptr;
         else
             m_FileSpec = unique_ptr<PdfFileSpec>(new PdfFileSpec(*obj));
     }
@@ -113,7 +110,7 @@ void PdfAnnotationPopup::SetOpen(const nullable<bool>& value)
 
 bool PdfAnnotationPopup::GetOpen() const
 {
-    return GetDictionary().GetKeyAs<bool>("Open", false);
+    return GetDictionary().FindKeyAsSafe<bool>("Open", false);
 }
 
 void PdfAnnotationText::SetOpen(const nullable<bool>& value)
@@ -126,7 +123,7 @@ void PdfAnnotationText::SetOpen(const nullable<bool>& value)
 
 bool PdfAnnotationText::GetOpen() const
 {
-    return GetDictionary().GetKeyAs<bool>("Open", false);
+    return GetDictionary().FindKeyAsSafe<bool>("Open", false);
 }
 
 PdfAnnotationTextMarkupBase::PdfAnnotationTextMarkupBase(PdfPage& page, PdfAnnotationType annotType, const Rect& rect)

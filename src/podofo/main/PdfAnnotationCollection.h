@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_ANNOTATION_COLLECTION_H
 #define PDF_ANNOTATION_COLLECTION_H
@@ -24,9 +21,9 @@ namespace PoDoFo
 
     public:
         template <typename TAnnotation>
-        TAnnotation& CreateAnnot(const Rect& rect, bool rawRect = false);
+        TAnnotation& CreateAnnot(const Rect& rect);
 
-        PdfAnnotation& CreateAnnot(PdfAnnotationType annotType, const Rect& rect, bool rawRect = false);
+        PdfAnnotation& CreateAnnot(PdfAnnotationType annotType, const Rect& rect);
 
         PdfAnnotation& GetAnnotAt(unsigned index);
 
@@ -103,7 +100,6 @@ namespace PoDoFo
         const_iterator end() const;
 
     private:
-        PdfAnnotation& createAnnotation(const std::type_info& typeInfo, const Rect& rect, bool rawRect);
         PdfAnnotation& addAnnotation(std::unique_ptr<PdfAnnotation>&& annot);
         PdfArray* getAnnotationsArray() const;
         void initAnnotations();
@@ -122,9 +118,9 @@ namespace PoDoFo
     };
 
     template<typename TAnnotation>
-    TAnnotation& PdfAnnotationCollection::CreateAnnot(const Rect& rect, bool rawRect)
+    TAnnotation& PdfAnnotationCollection::CreateAnnot(const Rect& rect)
     {
-        return static_cast<TAnnotation&>(createAnnotation(typeid(TAnnotation), rect, rawRect));
+        return static_cast<TAnnotation&>(CreateAnnot(PdfAnnotation::GetAnnotationType<TAnnotation>(), rect));
     }
 }
 

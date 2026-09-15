@@ -1,7 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2007 Dominik Seichter <domseichter@web.de>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2007 Dominik Seichter <domseichter@web.de>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include "PdfDeclarationsPrivate.h"
 #include "PdfFiltersImpl.h"
@@ -20,29 +18,46 @@ namespace PoDoFo {
 // evaluation.
 const unsigned s_Powers85[] = { 85 * 85 * 85 * 85, 85 * 85 * 85, 85 * 85, 85, 1 };
 
-/**
- * This structure contains all necessary values
- * for a FlateDecode and LZWDecode Predictor.
- * These values are normally stored in the /DecodeParams
- * key of a PDF dictionary.
- */
+/// This structure contains all necessary values
+/// for a FlateDecode and LZWDecode Predictor.
+/// These values are normally stored in the /DecodeParams
+/// key of a PDF dictionary.
 class PdfPredictorDecoder
 {
 public:
     PdfPredictorDecoder(const PdfDictionary& decodeParms)
     {
-        m_Predictor = static_cast<int>(decodeParms.FindKeyAs<int64_t>("Predictor", 1));
-        m_Colors = static_cast<int>(decodeParms.FindKeyAs<int64_t>("Colors", 1));
-        m_BitsPerComponent = static_cast<int>(decodeParms.FindKeyAs<int64_t>("BitsPerComponent", 8));
-        m_ColumnCount = static_cast<int>(decodeParms.FindKeyAs<int64_t>("Columns", 1));
-        m_EarlyChange = static_cast<int>(decodeParms.FindKeyAs<int64_t>("EarlyChange", 1));
-
         // check that input values are in range (CVE-2018-20797)
         // ISO 32000-2008 specifies these values as all 1 or greater
-        // negative values for m_nColumns / m_nColors / m_nBPC result in huge podofo_calloc
-        if (m_ColumnCount < 1 || m_Colors < 1 || m_BitsPerComponent < 1)
-            PODOFO_RAISE_ERROR(PdfErrorCode::ValueOutOfRange);
+        // Negative values for Columns / Colors / BitsPerComponent result in huge alloc
 
+        int64_t num = decodeParms.FindKeyAsSafe<int64_t>("Predictor", 1);
+        if (num < 1)
+        {
+        OutOfRange:
+            PODOFO_RAISE_ERROR_INFO(PdfErrorCode::ValueOutOfRange, "Image parameters are out of range");
+        }
+        m_Predictor = (unsigned)num;
+
+        num = decodeParms.FindKeyAsSafe<int64_t>("Colors", 1);
+        if (num < 1)
+            goto OutOfRange;
+        m_Colors = (unsigned)num;
+
+        num = decodeParms.FindKeyAsSafe<int64_t>("BitsPerComponent", 8);
+        if (num < 1)
+            goto OutOfRange;
+        m_BitsPerComponent = (unsigned)num;
+
+        num = decodeParms.FindKeyAsSafe<int64_t>("Columns", 1);
+        if (num < 1)
+            goto OutOfRange;
+        m_ColumnCount = (unsigned)num;
+
+        num = decodeParms.FindKeyAsSafe<int64_t>("EarlyChange", 1);
+        m_EarlyChange = num < 1 ? 1 : (unsigned)num;
+
+        m_BytesPerPixel = (m_BitsPerComponent * m_Colors) / 8;
         if (m_Predictor >= 10)
         {
             m_NextByteIsPredictor = true;
@@ -51,12 +66,11 @@ public:
         else
         {
             m_NextByteIsPredictor = false;
-            m_CurrPredictor = m_Predictor;
+            m_CurrPredictor = (int)m_Predictor;
         }
 
         m_CurrRowIndex = 0;
-        m_BytesPerPixel = (m_BitsPerComponent * m_Colors) >> 3;
-        m_Rows = (m_ColumnCount * m_Colors * m_BitsPerComponent) >> 3;
+        m_Rows = (m_ColumnCount * m_Colors * m_BitsPerComponent) / 8;
 
         // check for multiplication overflow on buffer sizes (e.g. if m_nBPC=2 and m_nColors=SIZE_MAX/2+1)
         if (utls::DoesMultiplicationOverflow(m_BitsPerComponent, m_Colors)
@@ -93,20 +107,18 @@ public:
             }
             else
             {
+                if (m_BitsPerComponent != 8)
+                    PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidPredictor, "Predictors with bits per component othern than 8 are not implemented");
+
+                PODOFO_ASSERT(m_BytesPerPixel != 0);
                 switch (m_CurrPredictor)
                 {
                     case 2: // Tiff Predictor
                     {
-                        if (m_BitsPerComponent == 8)
-                        {   // Same as png sub
-                            char prev = (m_CurrRowIndex - m_BytesPerPixel < 0
-                                ? 0 : m_Prev[m_CurrRowIndex - m_BytesPerPixel]);
-                            m_Prev[m_CurrRowIndex] = *buffer + prev;
-                            break;
-                        }
-
-                        // TODO: implement tiff predictor for other than 8 BPC
-                        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidPredictor, "tiff predictors other than 8 BPC are not implemented");
+                        // Same as png sub
+                        char prev = ((int)m_CurrRowIndex - (int)m_BytesPerPixel < 0
+                            ? 0 : m_Prev[m_CurrRowIndex - m_BytesPerPixel]);
+                        m_Prev[m_CurrRowIndex] = *buffer + prev;
                         break;
                     }
                     case 10: // png none
@@ -116,7 +128,7 @@ public:
                     }
                     case 11: // png sub
                     {
-                        char prev = (m_CurrRowIndex - m_BytesPerPixel < 0
+                        char prev = ((int)m_CurrRowIndex - (int)m_BytesPerPixel < 0
                             ? 0 : m_Prev[m_CurrRowIndex - m_BytesPerPixel]);
                         m_Prev[m_CurrRowIndex] = *buffer + prev;
                         break;
@@ -128,14 +140,14 @@ public:
                     }
                     case 13: // png average
                     {
-                        int prev = (m_CurrRowIndex - m_BytesPerPixel < 0
+                        int prev = ((int)m_CurrRowIndex - (int)m_BytesPerPixel < 0
                             ? 0 : m_Prev[m_CurrRowIndex - m_BytesPerPixel]);
                         m_Prev[m_CurrRowIndex] = (char)((prev + m_Prev[m_CurrRowIndex]) >> 1) + *buffer;
                         break;
                     }
                     case 14: // png paeth
                     {
-                        int nLeftByteIndex = m_CurrRowIndex - m_BytesPerPixel;
+                        int nLeftByteIndex = (int)m_CurrRowIndex - (int)m_BytesPerPixel;
 
                         int a = nLeftByteIndex < 0 ? 0 : static_cast<unsigned char>(m_Prev[nLeftByteIndex]);
                         int b = static_cast<unsigned char>(m_Prev[m_CurrRowIndex]);
@@ -197,16 +209,16 @@ public:
     }
 
 private:
-    int m_Predictor;
-    int m_Colors;
-    int m_BitsPerComponent;
-    int m_ColumnCount;
-    int m_EarlyChange;
-    int m_BytesPerPixel;     // Bytes per pixel
+    unsigned m_Predictor;
+    unsigned m_Colors;
+    unsigned m_BitsPerComponent;
+    unsigned m_ColumnCount;
+    unsigned m_EarlyChange;
+    unsigned m_BytesPerPixel;     // Bytes per pixel
 
     int m_CurrPredictor;
-    int m_CurrRowIndex;
-    int m_Rows;
+    unsigned m_CurrRowIndex;
+    unsigned m_Rows;
 
     bool m_NextByteIsPredictor;
 
@@ -249,7 +261,7 @@ void PdfHexFilter::DecodeBlockImpl(const char* buffer, size_t len)
     unsigned char val;
     while (len-- != 0)
     {
-        if (PdfTokenizer::IsWhitespace(*buffer))
+        if (PoDoFo::IsCharWhitespace(*buffer))
         {
             buffer++;
             continue;
@@ -463,10 +475,7 @@ void PdfAscii85Filter::WidePut(unsigned tuple, int bytes) const
 #pragma endregion PdfFlateFilter
 
 PdfFlateFilter::PdfFlateFilter()
-{
-    memset(m_buffer, 0, sizeof(m_buffer));
-    memset(&m_stream, 0, sizeof(m_stream));
-}
+    : m_buffer{ }, m_stream{ } { }
 
 void PdfFlateFilter::BeginEncodeImpl()
 {
@@ -497,7 +506,6 @@ void PdfFlateFilter::EncodeBlockInternal(const char* buffer, size_t len, int nMo
 
         if (deflate(&m_stream, nMode) == Z_STREAM_ERROR)
         {
-            FailEncodeDecode();
             PODOFO_RAISE_ERROR(PdfErrorCode::FlateError);
         }
 
@@ -512,7 +520,6 @@ void PdfFlateFilter::EncodeBlockInternal(const char* buffer, size_t len, int nMo
         catch (PdfError& e)
         {
             // clean up after any output stream errors
-            FailEncodeDecode();
             PODOFO_PUSH_FRAME(e);
             throw;
         }
@@ -551,17 +558,33 @@ void PdfFlateFilter::DecodeBlockImpl(const char* buffer, size_t len)
         m_stream.avail_out = BUFFER_SIZE;
         m_stream.next_out = m_buffer;
 
-        switch ((flateErr = inflate(&m_stream, Z_NO_FLUSH)))
+        switch ((flateErr = inflate(&m_stream, Z_SYNC_FLUSH)))
         {
             case Z_NEED_DICT:
-            case Z_DATA_ERROR:
             case Z_MEM_ERROR:
             {
+            FlateError:
                 PoDoFo::LogMessage(PdfLogSeverity::Error, "Flate Decoding Error from ZLib: {}", flateErr);
                 (void)inflateEnd(&m_stream);
 
-                FailEncodeDecode();
                 PODOFO_RAISE_ERROR(PdfErrorCode::FlateError);
+            }
+            case Z_DATA_ERROR:
+            {
+                if (m_stream.msg != nullptr && m_stream.msg == "incorrect data check"sv)
+                {
+                    // As found in qpdf, when inflating we can detect an error condition in
+                    // zlib that is ignored by most PDF implementations, and still get good
+                    // data if using Z_SYNC_FLUSH instead of Z_NO_FLUSH. Unfortunately this
+                    // error condition can be detected by string comparison only in zlib,
+                    // but ghostscript does the same as well. References:
+                    // https://github.com/qpdf/qpdf/blob/cc1623e7ae87e4d698910017196f6f65b635f6a7/libqpdf/Pl_Flate.cc#L171
+                    // https://github.com/ArtifexSoftware/ghostpdl/blob/5f06a65da5064036c001dc355188ca02f4181526/base/szlibd.c#L92
+                    PoDoFo::LogMessage(PdfLogSeverity::Warning, "Flate Decoding Error from ZLib: {}, incorrect data check", flateErr);
+                    break;
+                }
+
+                goto FlateError;
             }
             default:
                 break;
@@ -578,7 +601,6 @@ void PdfFlateFilter::DecodeBlockImpl(const char* buffer, size_t len)
         catch (PdfError& e)
         {
             // clean up after any output stream errors
-            FailEncodeDecode();
             PODOFO_PUSH_FRAME(e);
             throw;
         }
@@ -596,7 +618,7 @@ void PdfFlateFilter::EndDecodeImpl()
 #pragma region PdfRLEFilter
 
 PdfRLEFilter::PdfRLEFilter()
-    : m_CodeLen(0)
+    : m_CodeLen(0), m_AwaitingControlByte(true)
 {
 }
 
@@ -608,31 +630,54 @@ void PdfRLEFilter::EncodeBlockImpl(const char*, size_t)
 void PdfRLEFilter::BeginDecodeImpl(const PdfDictionary*)
 {
     m_CodeLen = 0;
+    m_AwaitingControlByte = true;
 }
 
 void PdfRLEFilter::DecodeBlockImpl(const char* buffer, size_t len)
 {
+    // See ISO 32000-2:2020, 7.4.5 "RunLengthDecode filter"
     while (len-- != 0)
     {
-        if (m_CodeLen == 0)
+        if (m_AwaitingControlByte)
         {
-            m_CodeLen = static_cast<int>(*buffer);
+            // Cast through unsigned char, or a control byte >= 128 would
+            // sign-extend to a negative int and be misclassified below
+            m_CodeLen = static_cast<unsigned char>(*buffer);
+            if (m_CodeLen == 128)
+            {
+                // EOD marker
+                break;
+            }
+            else if (m_CodeLen <= 127)
+            {
+                // The next m_CodeLen + 1 (1 to 128) bytes are literal
+                m_CodeLen++;
+                m_AwaitingControlByte = false;
+            }
+            else
+            {
+                // 129 to 255: the next single byte shall be repeated
+                // 257 - m_CodeLen times. Keep the raw value until that
+                // byte arrives, possibly in a later call
+                m_AwaitingControlByte = false;
+            }
         }
-        else if (m_CodeLen == 128)
+        else if (m_CodeLen <= 128)
         {
-            break;
-        }
-        else if (m_CodeLen <= 127)
-        {
+            // Mid literal run: m_CodeLen holds the remaining byte count
             GetStream().Write(buffer, 1);
-            m_CodeLen--;
+            if (--m_CodeLen == 0)
+                m_AwaitingControlByte = true;
         }
-        else if (m_CodeLen >= 129)
+        else
         {
-            m_CodeLen = 257 - m_CodeLen;
-
-            while (m_CodeLen--)
+            // Mid repeat run: this is the single byte to be repeated
+            int repeatCount = 257 - m_CodeLen;
+            for (int i = 0; i < repeatCount; i++)
                 GetStream().Write(buffer, 1);
+
+            m_CodeLen = 0;
+            m_AwaitingControlByte = true;
         }
 
         buffer++;

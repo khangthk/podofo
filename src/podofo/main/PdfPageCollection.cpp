@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2021 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2021 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfPageCollection.h"
@@ -21,7 +19,7 @@ using namespace PoDoFo;
 
 namespace
 {
-    enum class PdfPageTreeNodeType
+    enum class PdfPageTreeNodeType : uint8_t
     {
         Unknown,
         Node,
@@ -76,14 +74,42 @@ const PdfPage& PdfPageCollection::GetPageAt(unsigned index) const
 
 PdfPage& PdfPageCollection::GetPage(const PdfReference& ref)
 {
-    const_cast<PdfPageCollection&>(*this).initPages();
-    return getPage(ref);
+    initPages();
+    auto ret = getPage(ref);
+    if (ret == nullptr)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::ValueOutOfRange, "Page with reference {} {} R not found", ref.ObjectNumber(), ref.GenerationNumber());
+
+    return *ret;
 }
 
 const PdfPage& PdfPageCollection::GetPage(const PdfReference& ref) const
 {
     const_cast<PdfPageCollection&>(*this).initPages();
-    return getPage(ref);
+    auto ret = getPage(ref);
+    if (ret == nullptr)
+        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::ValueOutOfRange, "Page with reference {} {} R not found", ref.ObjectNumber(), ref.GenerationNumber());
+
+    return *ret;
+}
+
+bool PdfPageCollection::TryGetPage(const PdfReference& ref, PdfPage*& page)
+{
+    initPages();
+    page = getPage(ref);
+    if (page != nullptr)
+        return true;
+
+    return false;
+}
+
+bool PdfPageCollection::TryGetPage(const PdfReference& ref, const PdfPage*& page) const
+{
+    const_cast<PdfPageCollection&>(*this).initPages();
+    page = getPage(ref);
+    if (page != nullptr)
+        return true;
+
+    return false;
 }
 
 Rect PdfPageCollection::getActualRect(const nullable<Rect>& size)
@@ -101,19 +127,19 @@ Rect PdfPageCollection::getActualRect(const nullable<Rect>& size)
     }
 }
 
-PdfPage& PdfPageCollection::getPage(const PdfReference& ref) const
+PdfPage* PdfPageCollection::getPage(const PdfReference& ref) const
 {
     // We have to search through all pages,
     // as this is the only way
     // to instantiate the PdfPage with a correct list of parents
     for (unsigned i = 0; i < m_Pages.size(); i++)
     {
-        auto& page = *m_Pages[i];
-        if (page.GetObject().GetIndirectReference() == ref)
+        auto page = m_Pages[i];
+        if (page->GetObject().GetIndirectReference() == ref)
             return page;
     }
 
-    PODOFO_RAISE_ERROR(PdfErrorCode::ValueOutOfRange);
+    return nullptr;
 }
 
 PdfPageCollection::iterator PdfPageCollection::begin()
@@ -136,66 +162,102 @@ PdfPageCollection::const_iterator PdfPageCollection::end() const
     return m_Pages.end();
 }
 
-void PdfPageCollection::InsertPageAt(unsigned atIndex, PdfPage& pageObj)
+void PdfPageCollection::InsertPageAt(unsigned atIndex, unique_ptr<PdfPage> page)
 {
     FlattenStructure();
-    vector<PdfPage*> objs = { &pageObj };
+    vector<unique_ptr<PdfPage>> objs(1);
+    objs[0] = std::move(page);
     insertPagesAt(atIndex, objs);
 }
 
-void PdfPageCollection::insertPageAt(unsigned atIndex, PdfPage& pageObj)
+void PdfPageCollection::insertPageAt(unsigned atIndex, unique_ptr<PdfPage> page)
 {
-    vector<PdfPage*> objs = { &pageObj };
+    vector<unique_ptr<PdfPage>> objs(1);
+    objs[0] = std::move(page);
     insertPagesAt(atIndex, objs);
 }
 
-void PdfPageCollection::InsertPagesAt(unsigned atIndex, cspan<PdfPage*> pages)
+void PdfPageCollection::InsertPagesAt(unsigned atIndex, mspan<unique_ptr<PdfPage>> pages)
 {
     FlattenStructure();
     insertPagesAt(atIndex, pages);
 }
 
-bool PdfPageCollection::TryMovePageAt(unsigned atIndex, unsigned toIndex)
+bool PdfPageCollection::TryMovePageTo(unsigned atIndex, unsigned toIndex)
 {
     PODOFO_ASSERT(atIndex < m_Pages.size() && atIndex != toIndex);
     if (toIndex >= m_Pages.size())
         return false;
     
     FlattenStructure();
-    std::iter_swap(m_Pages.begin() + atIndex, m_Pages.begin() + toIndex);
-    m_kidsArray->SwapAt(atIndex, toIndex);
-    m_Pages[atIndex]->SetIndex(atIndex);
+
+    m_kidsArray->MoveTo(atIndex, toIndex);
+
+    auto temp = m_Pages[atIndex];
+    if (atIndex > toIndex)
+    {
+        for (unsigned i = atIndex; i > toIndex; i--)
+        {
+            m_Pages[i] = m_Pages[i - 1];
+            m_Pages[i]->SetIndex(i);
+        }
+    }
+    else
+    {
+        for (unsigned i = atIndex; i < toIndex; i++)
+        {
+            m_Pages[i] = m_Pages[i + 1];
+            m_Pages[i]->SetIndex(i);
+        }
+    }
+
+    m_Pages[toIndex] = temp;
     m_Pages[toIndex]->SetIndex(toIndex);
+
     return true;
 }
 
-void PdfPageCollection::insertPagesAt(unsigned atIndex, cspan<PdfPage*> pages)
+void PdfPageCollection::insertPagesAt(unsigned atIndex, mspan<unique_ptr<PdfPage>> pages)
 {
-    // Insert the pages and fix the indices
-    m_Pages.insert(m_Pages.begin() + atIndex, pages.begin(), pages.end());
-    for (unsigned i = atIndex; i < m_Pages.size(); i++)
-        m_Pages[i]->SetIndex(i);
-
-    // Update the actual /Kids array and set /Parent to the new pages
+    // Reserve capacity in all lists before touching any page state, so
+    // any allocation failure is caught here before ownership is transferred
+    m_Pages.reserve(m_Pages.size() + pages.size());
+    m_kidsArray->reserve(m_kidsArray->size() + pages.size());
     vector<PdfObject> pageObjects;
     pageObjects.reserve(pages.size());
+
+    // Set /Parent on each incoming page
+    for (auto& page : pages)
+        page->GetDictionary().AddKey("Parent"_n, GetObject().GetIndirectReference());
+
+    // Update /Count before filling the lists
+    GetDictionary().AddKey("Count"_n, static_cast<int64_t>(m_Pages.size() + pages.size()));
+
+    // Fill m_Pages and build the reference list, transferring ownership
+    m_Pages.insert(m_Pages.begin() + atIndex,
+        (unsigned)pages.size(), nullptr);
     for (unsigned i = 0; i < pages.size(); i++)
     {
         pageObjects.push_back(pages[i]->GetObject().GetIndirectReference());
-        pages[i]->GetDictionary().AddKey("Parent"_n, GetObject().GetIndirectReference());
+        m_Pages[atIndex + i] = pages[i].release();
     }
 
-    m_kidsArray->insert(m_kidsArray->begin() + atIndex, pageObjects.begin(), pageObjects.end());
-    GetDictionary().AddKey("Count"_n, static_cast<int64_t>(m_Pages.size()));
+    // Fix indices for all pages from atIndex onward
+    for (unsigned i = atIndex; i < m_Pages.size(); i++)
+        m_Pages[i]->SetIndex(i);
+
+    m_kidsArray->insert(m_kidsArray->begin() + atIndex,
+        std::make_move_iterator(pageObjects.begin()), std::make_move_iterator(pageObjects.end()));
 }
 
 PdfPage& PdfPageCollection::CreatePage(const nullable<Rect>& size_)
 {
     FlattenStructure();
     auto size = getActualRect(size_);
-    auto page = new PdfPage(GetDocument(), size);
-    insertPageAt((unsigned)m_Pages.size(), *page);
-    return *page;
+    unique_ptr<PdfPage> page(new PdfPage(GetDocument(), size));
+    auto& pageRef = *page;
+    insertPageAt((unsigned)m_Pages.size(), std::move(page));
+    return pageRef;
 }
 
 PdfPage& PdfPageCollection::CreatePage(PdfPageSize pageSize)
@@ -212,9 +274,10 @@ PdfPage& PdfPageCollection::CreatePageAt(unsigned atIndex, const nullable<Rect>&
     if (atIndex > pageCount)
         atIndex = pageCount;
 
-    auto page = new PdfPage(GetDocument(), size);
-    insertPageAt(atIndex, *page);
-    return *page;
+    unique_ptr<PdfPage> page(new PdfPage(GetDocument(), size));
+    auto& pageRef = *page;
+    insertPageAt(atIndex, std::move(page));
+    return pageRef;
 }
 
 PdfPage& PdfPageCollection::CreatePageAt(unsigned atIndex, PdfPageSize pageSize)
@@ -231,9 +294,9 @@ void PdfPageCollection::CreatePagesAt(unsigned atIndex, unsigned count, const nu
     if (atIndex > pageCount)
         atIndex = pageCount;
 
-    std::vector<PdfPage*> pages(count);
+    vector<unique_ptr<PdfPage>> pages(count);
     for (unsigned i = 0; i < count; i++)
-        pages[i] = new PdfPage(GetDocument(), size);
+        pages[i].reset(new PdfPage(GetDocument(), size));
 
     insertPagesAt(atIndex, pages);
 }
@@ -248,14 +311,28 @@ void PdfPageCollection::AppendDocumentPages(const PdfDocument& doc)
     return GetDocument().AppendDocumentPages(doc);
 }
 
-void PdfPageCollection::AppendDocumentPages(const PdfDocument& doc, unsigned pageIndex, unsigned pageCount)
+void PdfPageCollection::AppendDocumentPages(const PdfDocument& doc, unsigned pageIndex, unsigned pageCount, PdfObjectRelocationMap* map)
 {
-    return GetDocument().AppendDocumentPages(doc, pageIndex, pageCount);
+    if (map == nullptr)
+    {
+        // If a map is not supplied create one now
+        unordered_map<PdfReference, PdfObject*> mappedObjects;
+        return GetDocument().AppendDocumentPages(doc, pageIndex, pageCount, mappedObjects);
+    }
+
+    return GetDocument().AppendDocumentPages(doc, pageIndex, pageCount, map->Map);
 }
 
-void PdfPageCollection::InsertDocumentPageAt(unsigned atIndex, const PdfDocument& doc, unsigned pageIndex)
+void PdfPageCollection::InsertDocumentPageAt(unsigned atIndex, const PdfDocument& doc, unsigned pageIndex, PdfObjectRelocationMap* map)
 {
-    return GetDocument().InsertDocumentPageAt(atIndex, doc, pageIndex);
+    if (map == nullptr)
+    {
+        // If a map is not supplied create one now
+        unordered_map<PdfReference, PdfObject*> mappedObjects;
+        return GetDocument().InsertDocumentPageAt(atIndex, doc, pageIndex, mappedObjects);
+    }
+
+    return GetDocument().InsertDocumentPageAt(atIndex, doc, pageIndex, map->Map);
 }
 
 void PdfPageCollection::RemovePageAt(unsigned atIndex)
@@ -264,7 +341,9 @@ void PdfPageCollection::RemovePageAt(unsigned atIndex)
     if (atIndex >= m_Pages.size())
         return;
 
+    auto page = m_Pages[atIndex];
     m_Pages.erase(m_Pages.begin() + atIndex);
+    delete page;
     m_kidsArray->RemoveAt(atIndex);
 
     // Fix page indices
@@ -339,9 +418,9 @@ unsigned PdfPageCollection::traversePageTreeNode(PdfObject& obj, unsigned count,
         case PdfPageTreeNodeType::Page:
         {
             unsigned index = (unsigned)m_Pages.size();
-            auto page = new PdfPage(obj, vector<PdfObject*>(parents));
-            m_Pages.push_back(page);
-            page->SetIndex(index);
+            unique_ptr<PdfPage> page(new PdfPage(obj, vector<PdfObject*>(parents)));
+            m_Pages.push_back(page.get());
+            (*page.release()).SetIndex(index);
             return count - 1;
         }
         case PdfPageTreeNodeType::Unknown:
@@ -402,4 +481,11 @@ unsigned getChildCount(const PdfObject& nodeObj)
         return 1;
 
     return (unsigned)num;
+}
+
+PdfObjectRelocationMap::PdfObjectRelocationMap() { }
+
+void PdfObjectRelocationMap::Clear()
+{
+    Map.clear();
 }

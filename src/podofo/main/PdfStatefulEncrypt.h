@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2021 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2021 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_STATEFUL_ENCRYPT_H
 #define PDF_STATEFUL_ENCRYPT_H
@@ -18,12 +15,10 @@ namespace PoDoFo
         PdfStatefulEncrypt(const PdfEncrypt& encrypt, PdfEncryptContext& context, const PdfReference& objref);
 
     public:
-        /** Encrypt a character span
-         */
+        /// Encrypt a character span
         void EncryptTo(charbuff& out, const bufferview& view) const;
 
-        /** Decrypt a character span
-         */
+        /// Decrypt a character span
         void DecryptTo(charbuff& out, const bufferview& view) const;
 
         size_t CalculateStreamLength(size_t length) const;

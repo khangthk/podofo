@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PODOFO_FREETYPE_PRIVATE_H
 #define PODOFO_FREETYPE_PRIVATE_H
@@ -18,16 +15,32 @@
 
 namespace FT
 {
-    FT_Library GetLibrary();
-    FT_Face CreateFaceFromFile(const std::string_view& filepath, unsigned faceIndex,
+    /// Use this function instead to free a face handled by a FT_FacePtr
+    void FreeFace(FT_Face face);
+
+    /// Use this function instead to reference a face handled by a FT_FacePtr
+    void ReferenceFace(FT_Face face);
+
+    /// An unique smart pointer to be returned by helpers in this header
+    /// It implies faces will be freed with the specialized function FT::FreeFace
+    using FT_FacePtr = std::unique_ptr<FT_FaceRec_, decltype(&FreeFace)>;
+
+    /// @param buffer a copy of the buffer from which the face will be loaded.
+    /// It must be retained
+    FT_FacePtr CreateFaceFromFile(const std::string_view& filepath, unsigned faceIndex,
         PoDoFo::charbuff& buffer);
-    FT_Face CreateFaceFromBuffer(const PoDoFo::bufferview& view, unsigned faceIndex,
+    /// @param buffer a copy of the buffer from which the face will be loaded.
+    /// It must be retained
+    FT_FacePtr CreateFaceFromBuffer(const PoDoFo::bufferview& view, unsigned faceIndex,
         PoDoFo::charbuff& buffer);
+    // Extract a CFF table from a OpenType CFF font
+    FT_FacePtr ExtractCFFFont(FT_Face face, PoDoFo::charbuff& buffer);
     // No check for TTC fonts
-    FT_Face CreateFaceFromBuffer(const PoDoFo::bufferview& view);
+    FT_FacePtr CreateFaceFromBuffer(const PoDoFo::bufferview& view);
     PoDoFo::charbuff GetDataFromFace(FT_Face face);
     bool TryGetFontFileFormat(FT_Face face, PoDoFo::PdfFontFileType& format);
     bool IsPdfSupported(FT_Face face);
+    std::unordered_map<std::string_view, unsigned> GetPostMap(FT_Face face);
 }
 
 // Other legacy TrueType tables defined in Apple documentation

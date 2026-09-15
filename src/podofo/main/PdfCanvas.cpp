@@ -1,8 +1,6 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-FileCopyrightText: (C) 2020 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-FileCopyrightText: 2020 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include <podofo/private/PdfDeclarationsPrivate.h>
 #include "PdfCanvas.h"
@@ -42,16 +40,6 @@ void PdfCanvas::CopyContentsTo(charbuff& buffer) const
     CopyContentsTo(stream);
 }
 
-PdfObject* PdfCanvas::GetFromResources(PdfResourceType type, const string_view& key)
-{
-    return getFromResources(type, key);
-}
-
-const PdfObject* PdfCanvas::GetFromResources(PdfResourceType type, const string_view& key) const
-{
-    return const_cast<PdfCanvas&>(*this).getFromResources(type, key);
-}
-
 PdfResources* PdfCanvas::GetResources()
 {
     return getResources();
@@ -72,12 +60,7 @@ const PdfDictionaryElement& PdfCanvas::GetElement() const
     return const_cast<PdfCanvas&>(*this).getElement();
 }
 
-PdfObject* PdfCanvas::getFromResources(PdfResourceType type, const string_view& key)
+void PdfCanvas::EnsureResourcesCreated()
 {
-    auto resources = getResources();
-    if (resources == nullptr)
-        return nullptr;
-
-    return resources->GetResource(type, key);
-
+    (void)GetOrCreateResources();
 }

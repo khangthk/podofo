@@ -1,8 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2022 Francesco Pretto <ceztko@gmail.com>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- * SPDX-License-Identifier: MPL-2.0
- */
+// SPDX-FileCopyrightText: 2022 Francesco Pretto <ceztko@gmail.com>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #ifndef PDF_ANNOTATION_ACTION_BASE_H
 #define PDF_ANNOTATION_ACTION_BASE_H
@@ -97,19 +94,17 @@ namespace PoDoFo {
         PdfAnnotationActionBase(PdfObject& obj, PdfAnnotationType annotType);
 
     public:
-        /** Set the action that is executed for this annotation
-         *  \param action an action object
-         *
-         *  \see GetAction
-         */
+        /// Set the action that is executed for this annotation
+        /// @param action an action object
+        ///
+        /// @see GetAction
         void SetAction(nullable<const PdfAction&> action);
 
-        /** Get the action that is executed for this annotation
-         *  \returns an action object. The action object is owned
-         *           by the PdfAnnotation.
-         *
-         *  \see SetAction
-         */
+        /// Get the action that is executed for this annotation
+        /// @returns an action object. The action object is owned
+        ///           by the PdfAnnotation.
+        ///
+        /// @see SetAction
         nullable<PdfAction&> GetAction();
         nullable<const PdfAction&> GetAction() const;
 

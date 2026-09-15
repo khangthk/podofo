@@ -71,13 +71,13 @@ namespace utls
     void CombinePaths(std::filesystem::path& path, std::initializer_list<std::string_view> paths);
 
     template<typename ... Ts>
-    std::filesystem::path CombinePaths(const std::string_view& path1, const std::string_view& path2,
+    std::string CombinePaths(const std::string_view& path1, const std::string_view& path2,
         Ts&&... paths)
     {
         auto ret = std::filesystem::u8path(path1);
         ret /= std::filesystem::u8path(path2);
         CombinePaths(ret, { paths... });
-        return ret;
+        return ret.u8string();
     }
 }
 
@@ -105,15 +105,26 @@ namespace PoDoFo
         static std::string GetTestInputFilePath(const std::string_view& path1,
             Ts&&... paths);
 
+        template<typename ... Ts>
+        static void ReadTestInputFileTo(std::string& str, const std::string_view& path1,
+            Ts&&... paths);
+
         static const fs::path& GetTestInputPath();
         static const fs::path& GetTestOutputPath();
-        static void ReadTestInputFile(const std::string_view& filename, std::string& str);
-        static void WriteTestOutputFile(const std::string_view& filename, const std::string_view& view);
+        static void ReadTestInputFileTo(std::string& str, const std::string_view& filename);
+        static void WriteTestOutputFileTo(const std::string_view& filename, const std::string_view& view);
         static void AssertEqual(double expected, double actual, double threshold = THRESHOLD);
         static void SaveFramePPM(charbuff& buffer, const void* data,
             PdfPixelFormat srcPixelFormat, unsigned width, unsigned height);
         static void SaveFramePPM(OutputStream& stream, const void* data,
             PdfPixelFormat srcPixelFormat, unsigned width, unsigned height);
+
+        static bool IsBufferEqual(const bufferview& buffer, const std::string_view& filename);
+
+        static bool AreFilesEqual(const std::string_view& filename1, const std::string_view& filename2);
+
+    private:
+        static void readTestInputFileTo(std::string& str, const std::string_view& filepath);
     };
 
     template<typename ...Ts>
@@ -130,6 +141,14 @@ namespace PoDoFo
         auto ret = GetTestInputPath() / std::filesystem::u8path(path1);
         utls::CombinePaths(ret, { paths... });
         return ret.u8string();
+    }
+
+    template<typename ...Ts>
+    inline void TestUtils::ReadTestInputFileTo(std::string& str, const std::string_view& path1, Ts && ...paths)
+    {
+        auto filepath = GetTestInputPath() / std::filesystem::u8path(path1);
+        utls::CombinePaths(filepath, { paths... });
+        readTestInputFileTo(str, filepath.u8string());
     }
 }
 

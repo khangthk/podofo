@@ -1,7 +1,5 @@
-/**
- * SPDX-FileCopyrightText: (C) 2006 Dominik Seichter <domseichter@web.de>
- * SPDX-License-Identifier: LGPL-2.0-or-later
- */
+// SPDX-FileCopyrightText: 2006 Dominik Seichter <domseichter@web.de>
+// SPDX-License-Identifier: LGPL-2.0-or-later OR MPL-2.0
 
 #include "PdfDeclarationsPrivate.h"
 #include "PdfFilterFactory.h"
@@ -28,10 +26,10 @@ private:
         m_filter->EndEncode();
     }
 public:
-    PdfFilteredEncodeStream(const shared_ptr<OutputStream>& outputStream, PdfFilterType filterType)
-        : m_OutputStream(outputStream)
+    PdfFilteredEncodeStream(shared_ptr<OutputStream>&& outputStream, PdfFilterType filterType)
+        : m_OutputStream(std::move(outputStream))
     {
-        init(*outputStream, filterType);
+        init(*m_OutputStream, filterType);
     }
 protected:
     void writeBuffer(const char* buffer, size_t len) override
@@ -57,19 +55,24 @@ private:
 public:
     PdfFilteredDecodeStream(OutputStream& outputStream, const PdfFilterType filterType,
         const PdfDictionary* decodeParms)
-        : m_FilterFailed(false)
     {
         init(outputStream, filterType, decodeParms);
     }
 
     PdfFilteredDecodeStream(unique_ptr<OutputStream> outputStream, const PdfFilterType filterType,
         const PdfDictionary* decodeParms)
-        : m_OutputStream(std::move(outputStream)), m_FilterFailed(false)
+        : m_OutputStream(std::move(outputStream))
     {
         if (m_OutputStream == nullptr)
             PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidHandle, "Output stream must be not null");
 
         init(*m_OutputStream, filterType, decodeParms);
+    }
+
+    ~PdfFilteredDecodeStream()
+    {
+        if (m_filter != nullptr)
+            m_filter->EndDecode();
     }
 
 protected:
@@ -82,7 +85,7 @@ protected:
         catch (PdfError& e)
         {
             PODOFO_PUSH_FRAME(e);
-            m_FilterFailed = true;
+            m_filter = nullptr;
             throw;
         }
     }
@@ -90,14 +93,16 @@ protected:
     {
         try
         {
-            if (!m_FilterFailed)
+            if (m_filter != nullptr)
                 m_filter->EndDecode();
+
+            m_filter = nullptr;
         }
         catch (PdfError& e)
         {
             PODOFO_PUSH_FRAME_INFO(e, "PdfFilter::EndDecode() failed in filter of type {}",
                 PoDoFo::FilterToName(m_filter->GetType()));
-            m_FilterFailed = true;
+            m_filter = nullptr;
             throw;
         }
     }
@@ -105,16 +110,15 @@ protected:
 private:
     shared_ptr<OutputStream> m_OutputStream;
     unique_ptr<PdfFilter> m_filter;
-    bool m_FilterFailed;
 };
 
 // An InputStream class that will actually perform the decoding
 class PdfBufferedDecodeStream : public InputStream, private OutputStream
 {
 public:
-    PdfBufferedDecodeStream(const shared_ptr<InputStream>& inputStream, const PdfFilterList& filters,
+    PdfBufferedDecodeStream(shared_ptr<InputStream>&& inputStream, const PdfFilterList& filters,
         const vector<const PdfDictionary*>& decodeParms)
-        : m_inputEof(false), m_inputStream(inputStream), m_offset(0)
+        : m_inputEof(false), m_inputStream(std::move(inputStream)), m_offset(0)
     {
         PODOFO_INVARIANT(filters.size() != 0);
         int i = (int)filters.size() - 1;
@@ -211,13 +215,13 @@ bool PdfFilterFactory::TryCreate(PdfFilterType filterType, unique_ptr<PdfFilter>
     }
 }
 
-unique_ptr<OutputStream> PdfFilterFactory::CreateEncodeStream(const shared_ptr<OutputStream>& stream,
+unique_ptr<OutputStream> PdfFilterFactory::CreateEncodeStream(shared_ptr<OutputStream> stream,
     const PdfFilterList& filters)
 {
     PODOFO_RAISE_LOGIC_IF(!filters.size(), "Cannot create an EncodeStream from an empty list of filters");
 
     PdfFilterList::const_iterator it = filters.begin();
-    unique_ptr<OutputStream> filter(new PdfFilteredEncodeStream(stream, *it));
+    unique_ptr<OutputStream> filter(new PdfFilteredEncodeStream(std::move(stream), *it));
     it++;
 
     while (it != filters.end())
@@ -229,52 +233,49 @@ unique_ptr<OutputStream> PdfFilterFactory::CreateEncodeStream(const shared_ptr<O
     return filter;
 }
 
-unique_ptr<InputStream> PdfFilterFactory::CreateDecodeStream(const shared_ptr<InputStream>& stream,
+unique_ptr<InputStream> PdfFilterFactory::CreateDecodeStream(shared_ptr<InputStream> stream,
     const PdfFilterList& filters, const std::vector<const PdfDictionary*>& decodeParms)
 {
     PODOFO_RAISE_LOGIC_IF(stream == nullptr, "Cannot create an DecodeStream from an empty stream");
     PODOFO_RAISE_LOGIC_IF(filters.size() == 0, "Cannot create an DecodeStream from an empty list of filters");
-    return std::make_unique<PdfBufferedDecodeStream>(stream, filters, decodeParms);
+    return std::make_unique<PdfBufferedDecodeStream>(std::move(stream), filters, decodeParms);
 }
 
-PdfFilterList PdfFilterFactory::CreateFilterList(const PdfObject& filtersObj)
+PdfFilterList PdfFilterFactory::CreateFilterList(const PdfObject& filtersObj_)
 {
     PdfFilterList filters;
-    const PdfObject* filterKeyObj = nullptr;
-    if (filtersObj.IsDictionary()
-        && (filterKeyObj = filtersObj.GetDictionary().FindKey("Filter")) == nullptr
-        && filtersObj.IsArray())
+    const PdfDictionary* dict;
+    const PdfName* name;
+    const PdfArray* arr;
+    auto filtersObj = &filtersObj_;
+    if (filtersObj->TryGetDictionary(dict))
     {
-        filterKeyObj = &filtersObj;
-    }
-    else if (filtersObj.IsName())
-    {
-        filterKeyObj = &filtersObj;
-    }
-
-    if (filterKeyObj == nullptr)
-    {
-        // Object had no /Filter key . Return a null filter list.
-        return filters;
-    }
-
-    if (filterKeyObj->IsName())
-    {
-        addFilterTo(filters, filterKeyObj->GetName().GetString());
-    }
-    else if (filterKeyObj->IsArray())
-    {
-        for (auto filter : filterKeyObj->GetArray().GetIndirectIterator())
+        filtersObj = dict->FindKey("Filter");
+        if (filtersObj == nullptr)
         {
-            if (!filter->IsName())
+            // Invalid /Filter key/object. Return a null filter list.
+            return filters;
+        }
+    }
+
+    if (filtersObj->TryGetName(name))
+    {
+        addFilterTo(filters, name->GetString());
+    }
+    else if (filtersObj->TryGetArray(arr))
+    {
+        for (auto filter : arr->GetIndirectIterator())
+        {
+            if (!filter->TryGetName(name))
                 PODOFO_RAISE_ERROR_INFO(PdfErrorCode::UnsupportedFilter, "Filter array contained unexpected non-name type");
 
-            addFilterTo(filters, filter->GetName().GetString());
+            addFilterTo(filters, name->GetString());
         }
     }
     else
     {
-        PODOFO_RAISE_ERROR_INFO(PdfErrorCode::InvalidDataType, "Unexpected filter container type");
+        // Invalid /Filter key/object. Return a null filter list.
+        return filters;
     }
 
     return filters;
